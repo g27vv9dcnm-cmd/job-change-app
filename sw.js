@@ -1,6 +1,6 @@
 // オフラインでも開けるように、アプリ本体をキャッシュする。
 // ファイルを変更したら VERSION を上げると、次回起動時に新しい版へ入れ替わる。
-const VERSION = 'v1';
+const VERSION = 'v2';
 const CACHE = `job-change-app-${VERSION}`;
 const ASSETS = [
   './',
@@ -9,6 +9,9 @@ const ASSETS = [
   './js/app.js',
   './js/store.js',
   './js/model.js',
+  './js/legacy.js',
+  './js/firebase-config.js',
+  './vendor/firebase.js',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',

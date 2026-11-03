@@ -22,7 +22,8 @@ import {
   isValidDate,
   todayString,
   BACKUP_FORMAT,
-} from '../js/model.js';
+  pickNewer,
+} from "../js/model.js";
 
 const mk = (over = {}) => ({
   id: over.id ?? Math.random().toString(36),
@@ -190,4 +191,20 @@ test('countImport', () => {
 
 test('backupFileName', () => {
   assert.equal(backupFileName(new Date(2026, 10, 3)), 'job-change-backup-2026-11-03.json');
+});
+
+test('pickNewer keeps only missing or newer items', () => {
+  const existing = [
+    { id: 'a', updatedAt: '2026-11-02T00:00:00.000Z' },
+    { id: 'b', updatedAt: '2026-11-02T00:00:00.000Z' },
+  ];
+  const incoming = [
+    { id: 'a', updatedAt: '2026-11-01T00:00:00.000Z' }, // クラウドの方が新しい → 移さない
+    { id: 'b', updatedAt: '2026-11-03T00:00:00.000Z' }, // 端末の方が新しい → 移す
+    { id: 'c', updatedAt: '2026-10-01T00:00:00.000Z' }, // クラウドに無い → 移す
+    { id: 'a2', updatedAt: '2026-11-02T00:00:00.000Z' },
+  ];
+  assert.deepEqual(pickNewer(existing, incoming).map((x) => x.id), ['b', 'c', 'a2']);
+  assert.deepEqual(pickNewer(existing, [{ ...existing[0] }]), []);
+  assert.equal(pickNewer([], incoming).length, 4);
 });

@@ -3,7 +3,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test/model.test.mjs",
-    "start": "python3 -m http.server 8000"
+    "test": "node --test test/*.test.mjs",
+    "start": "python3 -m http.server 8000",
+    "build:vendor": "esbuild tools/firebase-entry.js --bundle --format=esm --minify --legal-comments=none --outfile=vendor/firebase.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "firebase": "^12.19.0"
   }
 }

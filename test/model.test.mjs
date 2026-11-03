@@ -11,6 +11,17 @@ import {
   parseBackup,
   countImport,
   backupFileName,
+  normalizeSessionInput,
+  validateSession,
+  createSession,
+  updateSession,
+  sortSessions,
+  sessionsOf,
+  sessionLabel,
+  formatDate,
+  isValidDate,
+  todayString,
+  BACKUP_FORMAT,
 } from '../js/model.js';
 
 const mk = (over = {}) => ({
@@ -75,17 +86,102 @@ test('usedSites orders presets first', () => {
   assert.deepEqual(usedSites(list), ['doda', 'Green', '自社エージェント']);
 });
 
-test('backup round trip', () => {
+const mkSession = (over = {}) => ({
+  id: over.id ?? Math.random().toString(36),
+  companyId: 'a',
+  type: '面接',
+  date: '2026-11-01',
+  title: '一次面接',
+  asked: [{ q: '志望動機は？', a: '御社の〜' }],
+  myQuestions: [{ q: '配属は？', a: '開発部' }],
+  memo: '',
+  createdAt: '2026-11-01T00:00:00.000Z',
+  updatedAt: '2026-11-01T00:00:00.000Z',
+  ...over,
+});
+
+test('backup round trip with sessions', () => {
   const list = [mk({ id: 'a', name: 'X', sites: ['doda'], url: 'https://x.jp', memo: 'm' })];
-  const text = JSON.stringify(toBackup(list));
-  assert.deepEqual(parseBackup(text), list);
+  const sessions = [mkSession({ id: 's1' })];
+  const text = JSON.stringify(toBackup(list, sessions));
+  assert.deepEqual(parseBackup(text), { companies: list, sessions });
+});
+
+test('parseBackup reads old version-1 files (companies only)', () => {
+  const list = [mk({ id: 'a' })];
+  const v1 = JSON.stringify({ format: BACKUP_FORMAT, version: 1, exportedAt: 'x', companies: list });
+  assert.deepEqual(parseBackup(v1), { companies: list, sessions: [] });
 });
 
 test('parseBackup rejects broken files', () => {
   assert.throws(() => parseBackup('not json'), /形式/);
   assert.throws(() => parseBackup('{"foo":1}'), /バックアップファイルではありません/);
-  assert.throws(() => parseBackup(JSON.stringify(toBackup([{ id: 'a', name: '' }]))), /1件目/);
-  assert.throws(() => parseBackup(JSON.stringify(toBackup([{ name: 'X' }]))), /1件目/);
+  assert.throws(() => parseBackup(JSON.stringify(toBackup([{ id: 'a', name: '' }]))), /会社の1件目/);
+  assert.throws(() => parseBackup(JSON.stringify(toBackup([{ name: 'X' }]))), /会社の1件目/);
+  assert.throws(() => parseBackup(JSON.stringify(toBackup([{ id: 'a/b', name: 'X' }]))), /会社の1件目/);
+  const companies = [mk({ id: 'a' })];
+  assert.throws(() => parseBackup(JSON.stringify(toBackup(companies, [mkSession({ companyId: 'zzz' })]))), /記録の1件目/);
+  assert.throws(() => parseBackup(JSON.stringify(toBackup(companies, [mkSession({ type: '謎' })]))), /記録の1件目/);
+  assert.throws(() => parseBackup(JSON.stringify({ ...toBackup(companies), sessions: 'x' })), /記録のデータ/);
+});
+
+test('normalizeSessionInput drops empty question rows and trims', () => {
+  const r = normalizeSessionInput({
+    type: '面接',
+    date: ' 2026-11-03 ',
+    title: ' 一次面接 ',
+    asked: [{ q: ' 志望動機 ', a: '答え\n' }, { q: '', a: '  ' }, { q: '', a: '答えだけ' }],
+    myQuestions: [{ q: '', a: '' }],
+    memo: 'メモ\n\n',
+  });
+  assert.deepEqual(r, {
+    type: '面接',
+    date: '2026-11-03',
+    title: '一次面接',
+    asked: [{ q: '志望動機', a: '答え' }, { q: '', a: '答えだけ' }],
+    myQuestions: [],
+    memo: 'メモ',
+  });
+});
+
+test('validateSession', () => {
+  assert.deepEqual(validateSession(normalizeSessionInput({ type: '面接' })), {});
+  assert.ok(validateSession(normalizeSessionInput({ type: '' })).type);
+  assert.ok(validateSession(normalizeSessionInput({ type: '面接', date: '2026-02-30' })).date);
+  assert.ok(validateSession(normalizeSessionInput({ type: '面接', date: '2026/11/03' })).date);
+  assert.ok(validateSession(normalizeSessionInput({ type: '面接', title: 'あ'.repeat(101) })).title);
+});
+
+test('isValidDate and formatDate', () => {
+  assert.equal(isValidDate('2026-11-03'), true);
+  assert.equal(isValidDate('2026-13-01'), false);
+  assert.equal(formatDate('2026-11-03'), '2026/11/03（火）');
+  assert.equal(formatDate(''), '');
+  assert.equal(todayString(new Date(2026, 0, 5)), '2026-01-05');
+});
+
+test('create/update session keeps ids', () => {
+  const s = createSession('c1', normalizeSessionInput({ type: '面接' }), new Date('2026-01-01T00:00:00Z'));
+  assert.equal(s.companyId, 'c1');
+  const u = updateSession(s, normalizeSessionInput({ type: 'その他', title: 'X' }), new Date('2026-02-01T00:00:00Z'));
+  assert.equal(u.id, s.id);
+  assert.equal(u.companyId, 'c1');
+  assert.equal(u.createdAt, s.createdAt);
+  assert.equal(u.type, 'その他');
+  assert.equal(sessionLabel(u), 'X');
+  assert.equal(sessionLabel(s), '面接');
+});
+
+test('sortSessions / sessionsOf: newest date first, undated last', () => {
+  const list = [
+    mkSession({ id: '1', date: '2026-10-01' }),
+    mkSession({ id: '2', date: '' }),
+    mkSession({ id: '3', date: '2026-11-01', createdAt: '2026-11-01T00:00:00Z' }),
+    mkSession({ id: '4', date: '2026-11-01', createdAt: '2026-11-02T00:00:00Z' }),
+    mkSession({ id: '5', companyId: 'b' }),
+  ];
+  assert.deepEqual(sortSessions(list.slice(0, 4)).map((s) => s.id), ['4', '3', '1', '2']);
+  assert.deepEqual(sessionsOf(list, 'b').map((s) => s.id), ['5']);
 });
 
 test('countImport', () => {

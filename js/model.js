@@ -12,7 +12,11 @@ export const PRESET_SITES = [
 
 export const NAME_MAX = 100;
 export const BACKUP_FORMAT = 'job-change-app-backup';
-export const BACKUP_VERSION = 1;
+export const BACKUP_VERSION = 2;
+
+/** 面接・セミナー記録の種類 */
+export const SESSION_TYPES = ['面接', 'セミナー・説明会', 'カジュアル面談', 'その他'];
+export const TITLE_MAX = 100;
 
 /** 入力値を整形する（前後の空白除去、サイトの重複除去） */
 export function normalizeInput(input) {
@@ -89,23 +93,126 @@ export function usedSites(companies) {
   return [...preset, ...others];
 }
 
-export function toBackup(companies, now = new Date()) {
+/* ---------- 面接・セミナー記録 ---------- */
+
+function normalizePairs(pairs) {
+  if (!Array.isArray(pairs)) return [];
+  return pairs
+    .map((p) => ({
+      q: String(p?.q ?? '').trim(),
+      a: String(p?.a ?? '').replace(/\s+$/, '').replace(/^\s*\n/, ''),
+    }))
+    .filter((p) => p.q || p.a.trim());
+}
+
+/** 記録の入力値を整形する（空の質問行は捨てる） */
+export function normalizeSessionInput(input) {
+  return {
+    type: String(input.type ?? '').trim(),
+    date: String(input.date ?? '').trim(),
+    title: String(input.title ?? '').trim(),
+    asked: normalizePairs(input.asked),
+    myQuestions: normalizePairs(input.myQuestions),
+    memo: String(input.memo ?? '').replace(/\s+$/, ''),
+  };
+}
+
+export function isValidDate(value) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!m) return false;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return d.getFullYear() === Number(m[1]) && d.getMonth() === Number(m[2]) - 1 && d.getDate() === Number(m[3]);
+}
+
+export function validateSession(input) {
+  const errors = {};
+  if (!SESSION_TYPES.includes(input.type)) errors.type = '種類を選んでください';
+  if (input.date && !isValidDate(input.date)) errors.date = '日付が正しくありません';
+  if (input.title.length > TITLE_MAX) errors.title = `名前は${TITLE_MAX}文字以内にしてください`;
+  return errors;
+}
+
+export function createSession(companyId, input, now = new Date()) {
+  const t = now.toISOString();
+  return { id: newId(), companyId, ...input, createdAt: t, updatedAt: t };
+}
+
+export function updateSession(existing, input, now = new Date()) {
+  return {
+    ...existing,
+    ...input,
+    id: existing.id,
+    companyId: existing.companyId,
+    createdAt: existing.createdAt,
+    updatedAt: now.toISOString(),
+  };
+}
+
+/** 記録の表示名（名前がなければ種類） */
+export function sessionLabel(s) {
+  return s.title || s.type;
+}
+
+/** 日付の新しい順（日付なしは最後）、同じ日付なら作成が新しい順 */
+export function sortSessions(sessions) {
+  return [...sessions].sort((a, b) => {
+    if (a.date !== b.date) {
+      if (!a.date) return 1;
+      if (!b.date) return -1;
+      return a.date < b.date ? 1 : -1;
+    }
+    return a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0;
+  });
+}
+
+export function sessionsOf(sessions, companyId) {
+  return sortSessions(sessions.filter((s) => s.companyId === companyId));
+}
+
+/** 'YYYY-MM-DD' を「2026/11/03（火）」の形にする */
+export function formatDate(value) {
+  if (!isValidDate(value)) return '';
+  const [y, m, d] = value.split('-').map(Number);
+  const w = '日月火水木金土'[new Date(y, m - 1, d).getDay()];
+  return `${y}/${String(m).padStart(2, '0')}/${String(d).padStart(2, '0')}（${w}）`;
+}
+
+export function todayString(now = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+/* ---------- バックアップ ---------- */
+
+export function toBackup(companies, sessions = [], now = new Date()) {
   return {
     format: BACKUP_FORMAT,
     version: BACKUP_VERSION,
     exportedAt: now.toISOString(),
     companies,
+    sessions,
   };
 }
 
 export function backupFileName(now = new Date()) {
-  const pad = (n) => String(n).padStart(2, '0');
-  return `job-change-backup-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}.json`;
+  return `job-change-backup-${todayString(now)}.json`;
+}
+
+function timestamps(raw) {
+  const now = new Date().toISOString();
+  return {
+    createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : now,
+    updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : now,
+  };
+}
+
+function hasId(raw) {
+  return raw && typeof raw === 'object' && typeof raw.id === 'string' && raw.id && !raw.id.includes('/');
 }
 
 /**
  * バックアップ文字列を読み取る。壊れていれば例外を投げる（既存データには触らない）。
- * 戻り値は検証済みの会社配列。
+ * 古い形式（会社だけ）にも対応する。戻り値は { companies, sessions }。
  */
 export function parseBackup(text) {
   let data;
@@ -117,23 +224,27 @@ export function parseBackup(text) {
   if (!data || data.format !== BACKUP_FORMAT || !Array.isArray(data.companies)) {
     throw new Error('このアプリのバックアップファイルではありません');
   }
-  return data.companies.map((raw, i) => {
-    if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string' || !raw.id) {
-      throw new Error(`${i + 1}件目のデータが壊れています`);
-    }
+  if (data.sessions !== undefined && !Array.isArray(data.sessions)) {
+    throw new Error('面接・セミナー記録のデータが壊れています');
+  }
+  const companies = data.companies.map((raw, i) => {
+    if (!hasId(raw)) throw new Error(`会社の${i + 1}件目のデータが壊れています`);
     const input = normalizeInput(raw);
-    const errors = validate(input);
-    if (Object.keys(errors).length) {
-      throw new Error(`${i + 1}件目のデータが壊れています`);
-    }
-    const now = new Date().toISOString();
-    return {
-      id: raw.id,
-      ...input,
-      createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : now,
-      updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : now,
-    };
+    if (Object.keys(validate(input)).length) throw new Error(`会社の${i + 1}件目のデータが壊れています`);
+    return { id: raw.id, ...input, ...timestamps(raw) };
   });
+  const companyIds = new Set(companies.map((c) => c.id));
+  const sessions = (data.sessions ?? []).map((raw, i) => {
+    if (!hasId(raw) || !companyIds.has(raw.companyId)) {
+      throw new Error(`面接・セミナー記録の${i + 1}件目のデータが壊れています`);
+    }
+    const input = normalizeSessionInput(raw);
+    if (Object.keys(validateSession(input)).length) {
+      throw new Error(`面接・セミナー記録の${i + 1}件目のデータが壊れています`);
+    }
+    return { id: raw.id, companyId: raw.companyId, ...input, ...timestamps(raw) };
+  });
+  return { companies, sessions };
 }
 
 /** 読み込み結果の件数を数える（同じIDは上書き、それ以外は追加） */

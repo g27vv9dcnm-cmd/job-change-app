@@ -1,12 +1,19 @@
-// 画面の切り替えと入力チェック。保存は store.js、データ処理は model.js が担当する。
+// 画面の切り替えと入力チェック。保存・同期は store.js、データ処理は model.js が担当する。
 import * as store from './store.js';
+import { readLegacyCompanies } from './legacy.js';
 import {
   PRESET_SITES,
   NAME_MAX,
+  TITLE_MAX,
+  SESSION_TYPES,
   filterCompanies,
   usedSites,
+  sessionsOf,
+  sessionLabel,
+  formatDate,
+  todayString,
+  toBackup,
   parseBackup,
-  countImport,
   backupFileName,
 } from './model.js';
 
@@ -18,6 +25,11 @@ const addBtn = document.getElementById('add-btn');
 const toastEl = document.getElementById('toast');
 
 const listState = { query: '', site: '' };
+let signedIn = false;
+/** データが同期で変わったときに今の画面を更新する関数（入力中のフォームでは null） */
+let refreshView = null;
+/** 同期の状態が変わったときに表示を更新する関数（設定画面のみ） */
+let refreshStatus = null;
 
 /* ---------- 小さなDOMヘルパー（文字列は必ず textContent で入れる） ---------- */
 function h(tag, attrs = {}, ...children) {
@@ -45,14 +57,14 @@ function setHeader(title, { back = false, settings = true, add = false } = {}) {
 }
 
 let toastTimer;
-function toast(message) {
+function toast(message, ms = 2500) {
   toastEl.textContent = message;
   toastEl.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (toastEl.hidden = true), 2500);
+  toastTimer = setTimeout(() => (toastEl.hidden = true), ms);
 }
 
-function confirmDialog(message, okLabel = 'OK', danger = false) {
+function confirmDialog(message, okLabel = 'OK', { danger = false, cancelLabel = 'キャンセル' } = {}) {
   return new Promise((resolve) => {
     const dlg = h(
       'dialog',
@@ -61,7 +73,7 @@ function confirmDialog(message, okLabel = 'OK', danger = false) {
       h(
         'div',
         { class: 'actions' },
-        h('button', { class: 'btn', type: 'button', onclick: () => dlg.close('cancel') }, 'キャンセル'),
+        h('button', { class: 'btn', type: 'button', onclick: () => dlg.close('cancel') }, cancelLabel),
         h(
           'button',
           { class: danger ? 'btn btn-primary btn-danger-fill' : 'btn btn-primary', type: 'button', onclick: () => dlg.close('ok') },
@@ -78,52 +90,137 @@ function confirmDialog(message, okLabel = 'OK', danger = false) {
   });
 }
 
+const lsGet = (k) => {
+  try {
+    return localStorage.getItem(k);
+  } catch {
+    return null;
+  }
+};
+const lsSet = (k, v) => {
+  try {
+    localStorage.setItem(k, v);
+  } catch {
+    /* 保存できなくても動作には影響しない */
+  }
+};
+
+const enc = encodeURIComponent;
+const companyHash = (id) => `#/c/${enc(id)}`;
+const sessionHash = (cid, sid) => `#/c/${enc(cid)}/s/${enc(sid)}`;
+
 function go(hash) {
   if (location.hash === hash) render();
   else location.hash = hash;
 }
 
-/* ---------- 一覧 ---------- */
-async function renderList() {
-  setHeader('転職先メモ', { add: true });
-  const all = await store.getAll();
-  const sites = usedSites(all);
-  if (listState.site && !sites.includes(listState.site)) listState.site = '';
+function chips(items) {
+  return h('div', { class: 'chips' }, items.map((s) => h('span', { class: 'chip' }, s)));
+}
 
-  if (all.length === 0) {
-    view.replaceChildren(
-      h('div', { class: 'empty' }, h('strong', {}, '行きたい会社を登録しましょう'), '右下の「＋」から登録できます'),
-    );
-    return;
+function field(label, content, { required = false, forId = null } = {}) {
+  return h(
+    'div',
+    { class: 'field' },
+    forId
+      ? h('label', { for: forId }, label, required ? h('span', { class: 'req' }, '必須') : null)
+      : h('span', { class: 'label' }, label),
+    content,
+  );
+}
+
+function showErrors(errors, map) {
+  let first = null;
+  for (const [key, { input, error }] of Object.entries(map)) {
+    error.textContent = errors[key] ?? '';
+    if (errors[key]) {
+      input.setAttribute('aria-invalid', 'true');
+      first ??= input;
+    } else {
+      input.removeAttribute('aria-invalid');
+    }
   }
+  first?.focus();
+}
+
+/* ---------- ログイン ---------- */
+function renderLogin() {
+  setHeader('転職先メモ', { settings: false });
+  refreshView = null;
+  refreshStatus = null;
+  const email = h('input', { id: 'l-email', type: 'email', autocomplete: 'username', inputmode: 'email', autocapitalize: 'off' });
+  const password = h('input', { id: 'l-password', type: 'password', autocomplete: 'current-password' });
+  const error = h('div', { class: 'error', role: 'alert' });
+  const submit = h('button', { class: 'btn btn-primary', type: 'submit' }, 'ログイン');
+
+  const onSubmit = async (e) => {
+    e.preventDefault();
+    error.textContent = '';
+    submit.disabled = true;
+    submit.textContent = 'ログイン中…';
+    try {
+      await store.signIn(email.value, password.value);
+      // 画面の切り替えは onAuth が行う
+    } catch (err) {
+      error.textContent = store.authErrorMessage(err);
+      submit.disabled = false;
+      submit.textContent = 'ログイン';
+    }
+  };
+
+  const onReset = async () => {
+    error.textContent = '';
+    if (!email.value.trim()) {
+      error.textContent = '先にメールアドレスを入力してください';
+      email.focus();
+      return;
+    }
+    try {
+      await store.resetPassword(email.value);
+      toast('パスワード再設定のメールを送りました', 4000);
+    } catch (err) {
+      error.textContent = store.authErrorMessage(err);
+    }
+  };
+
+  view.replaceChildren(
+    h(
+      'form',
+      { class: 'form login', novalidate: true, onsubmit: onSubmit },
+      h('p', { class: 'lead' }, 'Firebase に登録したメールアドレスとパスワードでログインしてください。スマホとパソコンで同じデータを見られます。'),
+      field('メールアドレス', email, { forId: 'l-email' }),
+      field('パスワード', password, { forId: 'l-password' }),
+      error,
+      submit,
+      h('button', { class: 'link-btn', type: 'button', onclick: onReset }, 'パスワードを忘れた場合'),
+    ),
+  );
+}
+
+function renderSetupNeeded() {
+  setHeader('転職先メモ', { settings: false });
+  view.replaceChildren(
+    h(
+      'div',
+      { class: 'empty' },
+      h('strong', {}, 'Firebase の設定がまだです'),
+      'js/firebase-config.js に Firebase の設定値を入れてください。',
+    ),
+  );
+}
+
+function renderLoading(message = '読み込み中…') {
+  setHeader('転職先メモ', { settings: false });
+  view.replaceChildren(h('div', { class: 'empty' }, message));
+}
+
+/* ---------- 一覧 ---------- */
+function renderList() {
+  setHeader('転職先メモ', { add: true });
 
   const listEl = h('ul', { class: 'list' });
   const countEl = h('p', { class: 'count' });
-
-  const draw = () => {
-    const items = filterCompanies(all, listState);
-    countEl.textContent = `${items.length}件`;
-    if (items.length === 0) {
-      listEl.replaceChildren(h('li', { class: 'empty' }, '条件に合う会社はありません'));
-      return;
-    }
-    listEl.replaceChildren(
-      ...items.map((c) =>
-        h(
-          'li',
-          {},
-          h(
-            'button',
-            { class: 'card', type: 'button', onclick: () => go(`#/c/${encodeURIComponent(c.id)}`) },
-            h('div', { class: 'card-name' }, c.name),
-            c.sites.length ? h('div', { class: 'chips' }, c.sites.map((s) => h('span', { class: 'chip' }, s))) : null,
-            c.memo ? h('div', { class: 'card-memo' }, c.memo) : null,
-          ),
-        ),
-      ),
-    );
-  };
-
+  const filtersEl = h('div', { class: 'filters' });
   const search = h('input', {
     class: 'search',
     type: 'search',
@@ -132,54 +229,87 @@ async function renderList() {
     value: listState.query,
     oninput: (e) => {
       listState.query = e.target.value;
-      draw();
+      update();
     },
   });
+  const toolbar = h('div', { class: 'toolbar' }, search, filtersEl);
 
-  const filterBtns = ['', ...sites].map((s) =>
-    h(
-      'button',
-      {
-        class: 'filter',
-        type: 'button',
-        'aria-pressed': String(listState.site === s),
-        onclick: () => {
-          listState.site = s;
-          filterBtns.forEach((b, i) => b.setAttribute('aria-pressed', String(['', ...sites][i] === s)));
-          draw();
-        },
-      },
-      s || 'すべて',
-    ),
-  );
+  function update() {
+    const all = store.getAll();
+    if (all.length === 0) {
+      view.replaceChildren(
+        h('div', { class: 'empty' }, h('strong', {}, '行きたい会社を登録しましょう'), '右下の「＋」から登録できます'),
+      );
+      return;
+    }
+    if (!view.contains(toolbar)) view.replaceChildren(toolbar, countEl, listEl);
 
-  view.replaceChildren(
-    h('div', { class: 'toolbar' }, search, sites.length ? h('div', { class: 'filters' }, filterBtns) : null),
-    countEl,
-    listEl,
-  );
-  draw();
+    const sites = usedSites(all);
+    if (listState.site && !sites.includes(listState.site)) listState.site = '';
+    filtersEl.hidden = sites.length === 0;
+    filtersEl.replaceChildren(
+      ...['', ...sites].map((s) =>
+        h(
+          'button',
+          {
+            class: 'filter',
+            type: 'button',
+            'aria-pressed': String(listState.site === s),
+            onclick: () => {
+              listState.site = s;
+              update();
+            },
+          },
+          s || 'すべて',
+        ),
+      ),
+    );
+
+    const items = filterCompanies(all, listState);
+    countEl.textContent = `${items.length}件`;
+    if (items.length === 0) {
+      listEl.replaceChildren(h('li', { class: 'empty' }, '条件に合う会社はありません'));
+      return;
+    }
+    const allSessions = store.getAllSessions();
+    listEl.replaceChildren(
+      ...items.map((c) => {
+        const n = allSessions.filter((s) => s.companyId === c.id).length;
+        return h(
+          'li',
+          {},
+          h(
+            'button',
+            { class: 'card', type: 'button', onclick: () => go(companyHash(c.id)) },
+            h('div', { class: 'card-name' }, c.name),
+            c.sites.length ? chips(c.sites) : null,
+            c.memo ? h('div', { class: 'card-memo' }, c.memo) : null,
+            n ? h('div', { class: 'card-meta' }, `面接・セミナー記録 ${n}件`) : null,
+          ),
+        );
+      }),
+    );
+  }
+
+  update();
+  refreshView = update;
 }
 
-/* ---------- 詳細 ---------- */
-async function renderDetail(id) {
-  const c = await store.get(id);
-  if (!c) return renderNotFound();
+/* ---------- 会社の詳細 ---------- */
+function renderDetail(id) {
+  const c = store.get(id);
+  if (!c) return renderNotFound('この会社は見つかりませんでした');
   setHeader(c.name, { back: true });
 
   const fmt = (iso) => new Date(iso).toLocaleString('ja-JP', { dateStyle: 'medium', timeStyle: 'short' });
+  const list = sessionsOf(store.getAllSessions(), c.id);
 
   view.replaceChildren(
     h(
       'div',
       { class: 'detail' },
       h('h2', {}, c.name),
-      h(
-        'div',
-        {},
-        h('div', { class: 'detail-label' }, '利用サイト'),
-        c.sites.length ? h('div', { class: 'chips' }, c.sites.map((s) => h('span', { class: 'chip' }, s))) : h('span', { class: 'muted' }, '未登録'),
-      ),
+      h('div', {}, h('div', { class: 'detail-label' }, '利用サイト'), c.sites.length ? chips(c.sites) : h('span', { class: 'muted' }, '未登録')),
       h(
         'div',
         {},
@@ -188,55 +318,70 @@ async function renderDetail(id) {
           ? h('a', { class: 'detail-url', href: c.url, target: '_blank', rel: 'noopener noreferrer' }, c.url)
           : h('span', { class: 'muted' }, '未登録'),
       ),
-      h(
-        'div',
-        {},
-        h('div', { class: 'detail-label' }, 'メモ'),
-        c.memo ? h('div', { class: 'detail-memo' }, c.memo) : h('span', { class: 'muted' }, '未登録'),
-      ),
+      h('div', {}, h('div', { class: 'detail-label' }, 'メモ'), c.memo ? h('div', { class: 'pre' }, c.memo) : h('span', { class: 'muted' }, '未登録')),
       h('div', { class: 'detail-meta' }, `登録 ${fmt(c.createdAt)}・更新 ${fmt(c.updatedAt)}`),
     ),
     h(
       'div',
       { class: 'actions', style: 'margin-top:14px' },
       h('button', { class: 'btn btn-danger', type: 'button', onclick: () => onDelete(c) }, '削除'),
-      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => go(`#/c/${encodeURIComponent(c.id)}/edit`) }, '編集'),
+      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => go(`${companyHash(c.id)}/edit`) }, '編集'),
+    ),
+    h(
+      'section',
+      { class: 'sessions' },
+      h(
+        'div',
+        { class: 'section-head' },
+        h('h3', {}, '面接・セミナー記録'),
+        h('button', { class: 'btn btn-small', type: 'button', onclick: () => go(`${companyHash(c.id)}/s/new`) }, '＋ 記録を追加'),
+      ),
+      list.length
+        ? h(
+            'ul',
+            { class: 'list' },
+            list.map((s) =>
+              h(
+                'li',
+                {},
+                h(
+                  'button',
+                  { class: 'card', type: 'button', onclick: () => go(sessionHash(c.id, s.id)) },
+                  h('div', { class: 'card-meta' }, [formatDate(s.date) || '日付なし', h('span', { class: 'chip chip-sub' }, s.type)]),
+                  h('div', { class: 'card-name' }, sessionLabel(s)),
+                  h('div', { class: 'card-memo' }, `聞かれたこと ${s.asked.length}件・自分の質問 ${s.myQuestions.length}件`),
+                ),
+              ),
+            ),
+          )
+        : h('p', { class: 'muted small' }, '面接やセミナーで聞かれたこと、自分がした質問を記録できます'),
     ),
   );
 }
 
 async function onDelete(c) {
-  if (!(await confirmDialog(`「${c.name}」を削除しますか？元に戻せません。`, '削除する', true))) return;
-  try {
-    await store.remove(c.id);
-    toast('削除しました');
-    go('#/');
-  } catch (err) {
-    toast(`削除できませんでした（${err.message}）`);
-  }
+  const n = store.sessionsFor(c.id).length;
+  const extra = n ? `面接・セミナー記録${n}件も一緒に削除されます。` : '';
+  if (!(await confirmDialog(`「${c.name}」を削除しますか？${extra}元に戻せません。`, '削除する', { danger: true }))) return;
+  store.remove(c.id);
+  toast('削除しました');
+  go('#/');
 }
 
-/* ---------- 登録／編集 ---------- */
-async function renderForm(id) {
+/* ---------- 会社の登録／編集 ---------- */
+function renderForm(id) {
   let existing = null;
   if (id) {
-    existing = await store.get(id);
-    if (!existing) return renderNotFound();
+    existing = store.get(id);
+    if (!existing) return renderNotFound('この会社は見つかりませんでした');
   }
   setHeader(existing ? '編集' : '会社を登録', { back: true, settings: false });
+  refreshView = null;
 
-  const all = await store.getAll();
   const selected = new Set(existing?.sites ?? []);
-  const siteChoices = [...new Set([...PRESET_SITES, ...usedSites(all), ...selected])];
+  const siteChoices = [...new Set([...PRESET_SITES, ...usedSites(store.getAll()), ...selected])];
 
-  const nameInput = h('input', {
-    id: 'f-name',
-    type: 'text',
-    autocomplete: 'off',
-    maxlength: String(NAME_MAX),
-    value: existing?.name ?? '',
-    'aria-describedby': 'e-name',
-  });
+  const nameInput = h('input', { id: 'f-name', type: 'text', autocomplete: 'off', maxlength: String(NAME_MAX), value: existing?.name ?? '' });
   const urlInput = h('input', {
     id: 'f-url',
     type: 'url',
@@ -245,12 +390,11 @@ async function renderForm(id) {
     autocapitalize: 'off',
     placeholder: 'https://',
     value: existing?.url ?? '',
-    'aria-describedby': 'e-url',
   });
-  const memoInput = h('textarea', { id: 'f-memo', placeholder: '志望動機、面接で聞かれたことなど' });
+  const memoInput = h('textarea', { id: 'f-memo', placeholder: '志望動機、気になる点など' });
   memoInput.value = existing?.memo ?? '';
-  const nameErr = h('div', { class: 'error', id: 'e-name', role: 'alert' });
-  const urlErr = h('div', { class: 'error', id: 'e-url', role: 'alert' });
+  const nameErr = h('div', { class: 'error', role: 'alert' });
+  const urlErr = h('div', { class: 'error', role: 'alert' });
 
   const optionsEl = h('div', { class: 'site-options', role: 'group', 'aria-label': '利用サイト' });
   const drawSites = () => {
@@ -291,7 +435,7 @@ async function renderForm(id) {
     }
   });
 
-  const onSubmit = async (e) => {
+  const onSubmit = (e) => {
     e.preventDefault();
     if (customInput.value.trim()) addCustom();
     const input = {
@@ -300,29 +444,16 @@ async function renderForm(id) {
       url: urlInput.value,
       memo: memoInput.value,
     };
-    nameErr.textContent = '';
-    urlErr.textContent = '';
-    nameInput.removeAttribute('aria-invalid');
-    urlInput.removeAttribute('aria-invalid');
     try {
-      const saved = existing ? await store.update(existing.id, input) : await store.add(input);
+      const saved = existing ? store.update(existing.id, input) : store.add(input);
       toast(existing ? '保存しました' : '登録しました');
-      // 編集画面を履歴に残さず詳細へ
-      history.replaceState(null, '', `#/c/${encodeURIComponent(saved.id)}`);
+      history.replaceState(null, '', companyHash(saved.id));
       render();
     } catch (err) {
       if (err instanceof store.ValidationError) {
-        if (err.errors.name) {
-          nameErr.textContent = err.errors.name;
-          nameInput.setAttribute('aria-invalid', 'true');
-        }
-        if (err.errors.url) {
-          urlErr.textContent = err.errors.url;
-          urlInput.setAttribute('aria-invalid', 'true');
-        }
-        (err.errors.name ? nameInput : urlInput).focus();
+        showErrors(err.errors, { name: { input: nameInput, error: nameErr }, url: { input: urlInput, error: urlErr } });
       } else {
-        toast(`保存できませんでした（${err.message}）`);
+        toast(err.message);
       }
     }
   };
@@ -331,16 +462,13 @@ async function renderForm(id) {
     h(
       'form',
       { class: 'form', novalidate: true, onsubmit: onSubmit },
-      h('div', { class: 'field' }, h('label', { for: 'f-name' }, '会社名', h('span', { class: 'req' }, '必須')), nameInput, nameErr),
-      h(
-        'div',
-        { class: 'field' },
-        h('span', { class: 'label' }, '利用サイト（複数選べます）'),
+      field('会社名', [nameInput, nameErr], { required: true, forId: 'f-name' }),
+      field('利用サイト（複数選べます）', [
         optionsEl,
         h('div', { class: 'site-add' }, customInput, h('button', { class: 'btn btn-small', type: 'button', onclick: addCustom }, '追加')),
-      ),
-      h('div', { class: 'field' }, h('label', { for: 'f-url' }, '求人URL'), urlInput, urlErr),
-      h('div', { class: 'field' }, h('label', { for: 'f-memo' }, 'メモ'), memoInput),
+      ]),
+      field('求人URL', [urlInput, urlErr], { forId: 'f-url' }),
+      field('メモ', memoInput, { forId: 'f-memo' }),
       h(
         'div',
         { class: 'actions' },
@@ -352,10 +480,226 @@ async function renderForm(id) {
   if (!existing) nameInput.focus();
 }
 
-/* ---------- 設定（バックアップ） ---------- */
-async function renderSettings() {
+/* ---------- 面接・セミナー記録の詳細 ---------- */
+function qaList(pairs, aLabel) {
+  if (!pairs.length) return h('p', { class: 'muted' }, 'なし');
+  return h(
+    'ol',
+    { class: 'qa-list' },
+    pairs.map((p) =>
+      h(
+        'li',
+        {},
+        h('div', { class: 'qa-q' }, p.q || '（質問なし）'),
+        p.a ? h('div', { class: 'qa-a' }, h('span', { class: 'qa-a-label' }, aLabel), h('div', { class: 'pre' }, p.a)) : null,
+      ),
+    ),
+  );
+}
+
+function renderSessionDetail(cid, sid) {
+  const c = store.get(cid);
+  const s = store.getSession(sid);
+  if (!c || !s || s.companyId !== cid) return renderNotFound('この記録は見つかりませんでした');
+  setHeader(sessionLabel(s), { back: true });
+
+  view.replaceChildren(
+    h(
+      'div',
+      { class: 'detail' },
+      h('div', { class: 'card-meta' }, [formatDate(s.date) || '日付なし', h('span', { class: 'chip chip-sub' }, s.type)]),
+      h('h2', {}, sessionLabel(s)),
+      h('div', { class: 'muted' }, c.name),
+      h('div', {}, h('div', { class: 'detail-label' }, `聞かれたこと（${s.asked.length}件）`), qaList(s.asked, '自分の答え')),
+      h('div', {}, h('div', { class: 'detail-label' }, `自分がした質問（${s.myQuestions.length}件）`), qaList(s.myQuestions, '返ってきた答え')),
+      h('div', {}, h('div', { class: 'detail-label' }, '感想・反省メモ'), s.memo ? h('div', { class: 'pre' }, s.memo) : h('span', { class: 'muted' }, 'なし')),
+    ),
+    h(
+      'div',
+      { class: 'actions', style: 'margin-top:14px' },
+      h('button', { class: 'btn btn-danger', type: 'button', onclick: () => onDeleteSession(s) }, '削除'),
+      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => go(`${sessionHash(cid, sid)}/edit`) }, '編集'),
+    ),
+  );
+}
+
+async function onDeleteSession(s) {
+  if (!(await confirmDialog(`「${sessionLabel(s)}」の記録を削除しますか？元に戻せません。`, '削除する', { danger: true }))) return;
+  store.removeSession(s.id);
+  toast('削除しました');
+  go(companyHash(s.companyId));
+}
+
+/* ---------- 面接・セミナー記録の登録／編集 ---------- */
+/** 質問と答えの組を何件でも入力できる部品 */
+function qaEditor(initial, { qLabel, aLabel, addLabel, name }) {
+  const rowsEl = h('div', { class: 'qa-rows' });
+  const rows = [];
+  const renumber = () =>
+    rows.forEach((r, i) => {
+      r.num.textContent = `${i + 1}`;
+    });
+  const addRow = (pair = { q: '', a: '' }, focus = false) => {
+    const q = h('textarea', { class: 'qa-input-q', rows: '2', placeholder: qLabel, 'aria-label': qLabel });
+    const a = h('textarea', { class: 'qa-input-a', rows: '3', placeholder: aLabel, 'aria-label': aLabel });
+    q.value = pair.q;
+    a.value = pair.a;
+    const num = h('span', { class: 'qa-num' });
+    const row = h(
+      'div',
+      { class: 'qa-row', 'data-name': name },
+      h(
+        'div',
+        { class: 'qa-row-head' },
+        num,
+        h(
+          'button',
+          {
+            class: 'link-btn danger',
+            type: 'button',
+            onclick: () => {
+              rows.splice(rows.indexOf(entry), 1);
+              row.remove();
+              renumber();
+            },
+          },
+          'この質問を消す',
+        ),
+      ),
+      q,
+      a,
+    );
+    const entry = { row, q, a, num };
+    rows.push(entry);
+    rowsEl.append(row);
+    renumber();
+    if (focus) q.focus();
+  };
+  (initial.length ? initial : [{ q: '', a: '' }]).forEach((p) => addRow(p));
+  const el = h('div', {}, rowsEl, h('button', { class: 'btn btn-small btn-add', type: 'button', onclick: () => addRow(undefined, true) }, addLabel));
+  return { el, value: () => rows.map((r) => ({ q: r.q.value, a: r.a.value })) };
+}
+
+function renderSessionForm(cid, sid) {
+  const c = store.get(cid);
+  if (!c) return renderNotFound('この会社は見つかりませんでした');
+  let existing = null;
+  if (sid) {
+    existing = store.getSession(sid);
+    if (!existing || existing.companyId !== cid) return renderNotFound('この記録は見つかりませんでした');
+  }
+  setHeader(existing ? '記録を編集' : '記録を追加', { back: true, settings: false });
+  refreshView = null;
+
+  let type = existing?.type ?? SESSION_TYPES[0];
+  const typeErr = h('div', { class: 'error', role: 'alert' });
+  const typeGroup = h('div', { class: 'site-options', role: 'radiogroup', 'aria-label': '種類' });
+  const drawTypes = () =>
+    typeGroup.replaceChildren(
+      ...SESSION_TYPES.map((t) =>
+        h(
+          'button',
+          {
+            class: 'site-option',
+            type: 'button',
+            role: 'radio',
+            'aria-checked': String(t === type),
+            'aria-pressed': String(t === type),
+            onclick: () => {
+              type = t;
+              drawTypes();
+            },
+          },
+          t,
+        ),
+      ),
+    );
+  drawTypes();
+
+  const dateInput = h('input', { id: 's-date', type: 'date', value: existing ? existing.date : todayString() });
+  const dateErr = h('div', { class: 'error', role: 'alert' });
+  const titleInput = h('input', {
+    id: 's-title',
+    type: 'text',
+    autocomplete: 'off',
+    maxlength: String(TITLE_MAX),
+    placeholder: '例：一次面接、会社説明会',
+    value: existing?.title ?? '',
+  });
+  const titleErr = h('div', { class: 'error', role: 'alert' });
+  const asked = qaEditor(existing?.asked ?? [], {
+    qLabel: '聞かれたこと',
+    aLabel: '自分の答え',
+    addLabel: '＋ 聞かれたことを追加',
+    name: 'asked',
+  });
+  const mine = qaEditor(existing?.myQuestions ?? [], {
+    qLabel: '自分がした質問',
+    aLabel: '返ってきた答え',
+    addLabel: '＋ 自分の質問を追加',
+    name: 'mine',
+  });
+  const memoInput = h('textarea', { id: 's-memo', placeholder: '雰囲気、うまく答えられなかったこと、次に活かしたいことなど' });
+  memoInput.value = existing?.memo ?? '';
+
+  const onSubmit = (e) => {
+    e.preventDefault();
+    const input = {
+      type,
+      date: dateInput.value,
+      title: titleInput.value,
+      asked: asked.value(),
+      myQuestions: mine.value(),
+      memo: memoInput.value,
+    };
+    try {
+      const saved = existing ? store.updateSessionById(existing.id, input) : store.addSession(cid, input);
+      toast(existing ? '保存しました' : '記録しました');
+      history.replaceState(null, '', sessionHash(cid, saved.id));
+      render();
+    } catch (err) {
+      if (err instanceof store.ValidationError) {
+        showErrors(err.errors, {
+          type: { input: typeGroup, error: typeErr },
+          date: { input: dateInput, error: dateErr },
+          title: { input: titleInput, error: titleErr },
+        });
+      } else {
+        toast(err.message);
+      }
+    }
+  };
+
+  view.replaceChildren(
+    h('p', { class: 'muted form-company' }, c.name),
+    h(
+      'form',
+      { class: 'form', novalidate: true, onsubmit: onSubmit },
+      field('種類', [typeGroup, typeErr]),
+      field('日付', [dateInput, dateErr], { forId: 's-date' }),
+      field('名前', [titleInput, titleErr], { forId: 's-title' }),
+      field('聞かれたこと と 自分の答え', asked.el),
+      field('自分がした質問 と 返ってきた答え', mine.el),
+      field('感想・反省メモ', memoInput, { forId: 's-memo' }),
+      h(
+        'div',
+        { class: 'actions' },
+        h('button', { class: 'btn', type: 'button', onclick: () => go(parentHash()) }, 'キャンセル'),
+        h('button', { class: 'btn btn-primary', type: 'submit' }, '保存'),
+      ),
+    ),
+  );
+}
+
+/* ---------- 設定 ---------- */
+const STATUS_TEXT = {
+  synced: '同期済み',
+  pending: '未送信の変更があります。ネットにつながると自動で送信されます',
+  offline: 'オフラインです。この端末に保存されたデータを表示しています',
+};
+
+function renderSettings() {
   setHeader('設定', { back: true, settings: false });
-  const all = await store.getAll();
 
   const fileInput = h('input', {
     type: 'file',
@@ -367,35 +711,53 @@ async function renderSettings() {
       if (file) await onImport(file);
     },
   });
+  const statusEl = h('p', { class: 'sync-status' });
+  const countEl = h('p', {});
+  const update = () => {
+    const st = store.syncStatus();
+    statusEl.textContent = STATUS_TEXT[st];
+    statusEl.dataset.status = st;
+    countEl.textContent = `会社${store.getAll().length}件と面接・セミナー記録${store.getAllSessions().length}件をファイルに保存します。機種変更やもしもの時のための控えです。`;
+  };
+  update();
+  refreshView = update;
+  refreshStatus = update;
 
   view.replaceChildren(
     h(
       'section',
       { class: 'section' },
-      h('h2', {}, 'バックアップを書き出す'),
-      h('p', {}, `登録中の${all.length}件をファイルに保存します。ファイルアプリやiCloud Driveに保存しておくと、機種変更のときに戻せます。`),
-      h('button', { class: 'btn btn-primary', type: 'button', onclick: onExport }, '書き出す'),
+      h('h2', {}, 'アカウントと同期'),
+      h('p', {}, `ログイン中：${store.currentEmail()}`),
+      statusEl,
+      h('p', {}, '同じアカウントでログインすれば、スマホとパソコンで同じデータを見られます。'),
+      h('button', { class: 'btn', type: 'button', onclick: onSignOut }, 'ログアウト'),
     ),
+    h('section', { class: 'section' }, h('h2', {}, 'バックアップを書き出す'), countEl, h('button', { class: 'btn btn-primary', type: 'button', onclick: onExport }, '書き出す')),
     h(
       'section',
       { class: 'section' },
       h('h2', {}, 'バックアップを読み込む'),
-      h('p', {}, '書き出したファイルから戻します。同じ会社は上書きされ、ない会社は追加されます。'),
+      h('p', {}, '書き出したファイルから戻します。同じ会社・記録は上書きされ、ないものは追加されます。'),
       h('button', { class: 'btn', type: 'button', onclick: () => fileInput.click() }, 'ファイルを選ぶ'),
       fileInput,
-    ),
-    h(
-      'section',
-      { class: 'section' },
-      h('h2', {}, 'データの保存場所について'),
-      h('p', {}, 'データはこのスマホの中だけに保存され、外部には送られません。ホーム画面に追加して使い、ときどき書き出しておくのがおすすめです。'),
     ),
   );
 }
 
+async function onSignOut() {
+  const pending = store.syncStatus() === 'pending';
+  const msg = pending
+    ? 'まだ送信されていない変更があります。いまログアウトすると、その変更は失われる可能性があります。ログアウトしますか？'
+    : 'ログアウトしますか？';
+  if (!(await confirmDialog(msg, 'ログアウト', { danger: pending }))) return;
+  history.replaceState(null, '', '#/');
+  await store.signOut();
+}
+
 async function onExport() {
   try {
-    const text = await store.exportBackup();
+    const text = store.exportBackup();
     const name = backupFileName();
     const file = new File([text], name, { type: 'application/json' });
     if (navigator.canShare?.({ files: [file] })) {
@@ -420,62 +782,126 @@ async function onExport() {
 }
 
 async function onImport(file) {
-  let incoming;
+  let preview;
   try {
-    incoming = parseBackup(await file.text());
+    preview = store.previewImport(await file.text());
   } catch (err) {
-    toast(`読み込めませんでした（${err.message}）`);
+    toast(`読み込めませんでした（${err.message}）`, 4000);
     return;
   }
-  const { added, updated } = countImport(await store.getAll(), incoming);
-  const ok = await confirmDialog(`${incoming.length}件を読み込みます（追加${added}件・上書き${updated}件）。よろしいですか？`, '読み込む');
+  const { companies: c, sessions: s } = preview;
+  const ok = await confirmDialog(
+    `会社${c.added + c.updated}件（追加${c.added}・上書き${c.updated}）と、記録${s.added + s.updated}件（追加${s.added}・上書き${s.updated}）を読み込みます。よろしいですか？`,
+    '読み込む',
+  );
   if (!ok) return;
-  try {
-    await store.importBackup(await file.text());
-    toast(`読み込みました（追加${added}件・上書き${updated}件）`);
-    go('#/');
-  } catch (err) {
-    toast(`読み込めませんでした（${err.message}）`);
-  }
+  store.importData(preview.data);
+  toast('読み込みました');
+  go('#/');
 }
 
-function renderNotFound() {
+/* ---------- 以前の版（端末内保存）からの移行 ---------- */
+async function maybeMigrateLegacy(user) {
+  const key = `legacy-migrated:${user.uid}`;
+  if (lsGet(key)) return;
+  const legacy = await readLegacyCompanies();
+  if (!legacy.length) {
+    lsSet(key, 'none');
+    return;
+  }
+  let data;
+  try {
+    data = parseBackup(JSON.stringify(toBackup(legacy, [])));
+  } catch (err) {
+    toast(`この端末の以前のデータを読み込めませんでした（${err.message}）`, 4000);
+    return;
+  }
+  const ok = await confirmDialog(
+    `この端末に、同期を入れる前のデータ（${data.companies.length}社）が残っています。クラウドに移して、パソコンでも見られるようにしますか？`,
+    '移す',
+    { cancelLabel: '今はしない' },
+  );
+  if (!ok) return;
+  store.importData(data);
+  lsSet(key, 'done');
+  toast(`${data.companies.length}社をクラウドに移しました`);
+  if (refreshView) refreshView();
+}
+
+function renderNotFound(message) {
   setHeader('見つかりません', { back: true });
-  view.replaceChildren(h('div', { class: 'empty' }, h('strong', {}, 'この会社は見つかりませんでした'), '削除された可能性があります'));
+  view.replaceChildren(h('div', { class: 'empty' }, h('strong', {}, message), '削除された可能性があります'));
 }
 
 /* ---------- ルーティング ---------- */
-async function render() {
-  const path = location.hash.replace(/^#/, '') || '/';
-  let m;
-  try {
-    if (path === '/') await renderList();
-    else if (path === '/new') await renderForm(null);
-    else if (path === '/settings') await renderSettings();
-    else if ((m = path.match(/^\/c\/([^/]+)\/edit$/))) await renderForm(decodeURIComponent(m[1]));
-    else if ((m = path.match(/^\/c\/([^/]+)$/))) await renderDetail(decodeURIComponent(m[1]));
-    else await renderList();
-  } catch (err) {
-    console.error(err);
-    view.replaceChildren(
-      h('div', { class: 'empty' }, h('strong', {}, 'データを読み込めませんでした'), 'プライベートブラウズでは保存できないことがあります。通常モードで開いてください。'),
-    );
-  }
-  window.scrollTo(0, 0);
-}
-
 function parentHash() {
   const path = location.hash.replace(/^#/, '') || '/';
-  const m = path.match(/^\/c\/([^/]+)\/edit$/);
-  return m ? `#/c/${m[1]}` : '#/';
+  let m;
+  if ((m = path.match(/^\/c\/([^/]+)\/s\/([^/]+)\/edit$/))) return `#/c/${m[1]}/s/${m[2]}`;
+  if ((m = path.match(/^\/c\/([^/]+)\/(edit|s\/.+)$/))) return `#/c/${m[1]}`;
+  return '#/';
+}
+
+function render({ keepScroll = false } = {}) {
+  if (!signedIn) return;
+  const y = window.scrollY;
+  refreshView = null;
+  refreshStatus = null;
+  const path = location.hash.replace(/^#/, '') || '/';
+  const dec = decodeURIComponent;
+  let m;
+  try {
+    if (path === '/new') renderForm(null);
+    else if (path === '/settings') renderSettings();
+    else if ((m = path.match(/^\/c\/([^/]+)\/s\/new$/))) renderSessionForm(dec(m[1]), null);
+    else if ((m = path.match(/^\/c\/([^/]+)\/s\/([^/]+)\/edit$/))) renderSessionForm(dec(m[1]), dec(m[2]));
+    else if ((m = path.match(/^\/c\/([^/]+)\/s\/([^/]+)$/))) {
+      renderSessionDetail(dec(m[1]), dec(m[2]));
+      refreshView = () => render({ keepScroll: true });
+    } else if ((m = path.match(/^\/c\/([^/]+)\/edit$/))) renderForm(dec(m[1]));
+    else if ((m = path.match(/^\/c\/([^/]+)$/))) {
+      renderDetail(dec(m[1]));
+      refreshView = () => render({ keepScroll: true });
+    } else renderList();
+  } catch (err) {
+    console.error(err);
+    view.replaceChildren(h('div', { class: 'empty' }, h('strong', {}, '表示できませんでした'), err.message));
+  }
+  window.scrollTo(0, keepScroll ? y : 0);
 }
 
 backBtn.addEventListener('click', () => go(parentHash()));
 settingsBtn.addEventListener('click', () => go('#/settings'));
 addBtn.addEventListener('click', () => go('#/new'));
-window.addEventListener('hashchange', render);
+window.addEventListener('hashchange', () => render());
 
-render();
+/* ---------- 起動 ---------- */
+function start() {
+  if (!store.isConfigured()) {
+    renderSetupNeeded();
+    return;
+  }
+  renderLoading();
+  store.init();
+  store.onData(() => refreshView?.());
+  store.onStatus(() => refreshStatus?.());
+  store.onError((err) => toast(store.saveErrorMessage(err), 5000));
+  store.onAuth(async (user) => {
+    if (!user) {
+      signedIn = false;
+      store.stopSync();
+      renderLogin();
+      return;
+    }
+    renderLoading('データを読み込み中…');
+    await store.startSync(user);
+    signedIn = true;
+    render();
+    maybeMigrateLegacy(user);
+  });
+}
+
+start();
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js').catch((err) => console.warn('Service Worker 登録失敗', err));

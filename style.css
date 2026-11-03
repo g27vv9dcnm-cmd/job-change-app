@@ -197,7 +197,7 @@ main { padding: 16px; max-width: 640px; margin: 0 auto; outline: none; }
 .detail h2 { margin: 0; font-size: 22px; word-break: break-word; }
 .detail-label { font-size: 13px; color: var(--muted); margin-bottom: 4px; }
 .detail-url { color: var(--accent); word-break: break-all; }
-.detail-memo { white-space: pre-wrap; word-break: break-word; }
+.pre { white-space: pre-wrap; word-break: break-word; }
 .muted { color: var(--muted); }
 .detail-meta { font-size: 12px; color: var(--muted); }
 
@@ -234,3 +234,59 @@ dialog p { margin: 0 0 18px; }
 }
 .toast[hidden] { display: none; }
 .btn-danger-fill { background: var(--danger); border-color: var(--danger); }
+
+/* ログイン */
+.login { max-width: 420px; margin: 24px auto 0; }
+.lead { margin: 0; color: var(--muted); font-size: 14px; }
+.field input[type="email"], .field input[type="password"], .field input[type="date"] {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  font-size: 16px;
+}
+.field input[type="date"] { min-height: 48px; -webkit-appearance: none; appearance: none; }
+.link-btn { border: 0; background: none; color: var(--accent); padding: 6px 0; font-size: 14px; cursor: pointer; text-align: center; }
+.link-btn.danger { color: var(--danger); font-size: 13px; }
+button:disabled { opacity: 0.6; }
+
+/* 一覧・詳細の補足 */
+.card-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--muted); font-size: 13px; margin-top: 6px; }
+.card-meta:first-child { margin-top: 0; margin-bottom: 4px; }
+.chip-sub { font-size: 12px; padding: 1px 8px; }
+.small { font-size: 14px; }
+
+/* 面接・セミナー記録 */
+.sessions { margin-top: 28px; }
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.section-head h3 { margin: 0; font-size: 17px; }
+.qa-list { margin: 4px 0 0; padding-left: 1.4em; display: flex; flex-direction: column; gap: 12px; }
+.qa-q { font-weight: 700; word-break: break-word; }
+.qa-a { margin-top: 4px; padding: 8px 10px; border-left: 3px solid var(--chip-bg); background: var(--bg); border-radius: 0 8px 8px 0; }
+.qa-a-label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 2px; }
+.form-company { margin: 0 0 12px; font-weight: 600; }
+.qa-rows { display: flex; flex-direction: column; gap: 12px; }
+.qa-row { border: 1px solid var(--border); border-radius: 12px; padding: 10px; background: var(--surface); display: flex; flex-direction: column; gap: 8px; }
+.qa-row-head { display: flex; justify-content: space-between; align-items: center; }
+.qa-num { font-size: 13px; font-weight: 700; color: var(--muted); }
+.qa-num::before { content: "#"; }
+.qa-row textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  font-size: 16px;
+  resize: vertical;
+  min-height: 0;
+}
+.qa-row .qa-input-q { font-weight: 600; }
+.btn-add { margin-top: 10px; width: 100%; }
+
+/* 同期の状態 */
+.sync-status { font-weight: 600; }
+.sync-status::before { content: "●"; margin-right: 6px; }
+.sync-status[data-status="synced"]::before { color: #2e9d57; }
+.sync-status[data-status="pending"]::before { color: #e0a100; }
+.sync-status[data-status="offline"]::before { color: var(--muted); }

@@ -1058,6 +1058,31 @@ settingsBtn.addEventListener('click', () => go('#/settings'));
 addBtn.addEventListener('click', () => go('#/new'));
 window.addEventListener('hashchange', () => render());
 
+/* ---------- 入力欄を文章に合わせて伸ばす ---------- */
+// 書いた文章が全部見えるよう、textarea の高さを中身に合わせる（CSS の min-height より小さくはならない）
+function autoGrow(el) {
+  if (!el.isConnected || !el.offsetParent) return;
+  el.style.height = 'auto';
+  el.style.height = `${el.scrollHeight + 2}px`;
+}
+const growAll = (root = view) => root.querySelectorAll('textarea').forEach(autoGrow);
+document.addEventListener('input', (e) => {
+  if (e.target instanceof HTMLTextAreaElement) autoGrow(e.target);
+});
+new MutationObserver((records) => {
+  for (const r of records) {
+    for (const n of r.addedNodes) {
+      if (n instanceof HTMLTextAreaElement) autoGrow(n);
+      else if (n instanceof Element) growAll(n);
+    }
+  }
+}).observe(view, { childList: true, subtree: true });
+let growTimer;
+window.addEventListener('resize', () => {
+  clearTimeout(growTimer);
+  growTimer = setTimeout(() => growAll(), 100);
+});
+
 /* ---------- 起動 ---------- */
 function start() {
   if (!store.isConfigured()) {

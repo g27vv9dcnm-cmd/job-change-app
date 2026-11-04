@@ -23,6 +23,8 @@ import {
   todayString,
   BACKUP_FORMAT,
   pickNewer,
+  fieldsOf,
+  usedFieldTitles,
 } from "../js/model.js";
 
 const mk = (over = {}) => ({
@@ -38,7 +40,7 @@ const mk = (over = {}) => ({
 
 test('normalizeInput trims and dedupes sites', () => {
   const r = normalizeInput({ name: '  株式会社X ', sites: ['doda', ' doda ', '', 'Green'], url: ' https://x.jp ', memo: 'メモ\n\n' });
-  assert.deepEqual(r, { name: '株式会社X', sites: ['doda', 'Green'], url: 'https://x.jp', memo: 'メモ' });
+  assert.deepEqual(r, { name: '株式会社X', sites: ['doda', 'Green'], url: 'https://x.jp', memo: 'メモ', fields: [] });
 });
 
 test('validate requires name', () => {
@@ -102,7 +104,7 @@ const mkSession = (over = {}) => ({
 });
 
 test('backup round trip with sessions', () => {
-  const list = [mk({ id: 'a', name: 'X', sites: ['doda'], url: 'https://x.jp', memo: 'm' })];
+  const list = [mk({ id: 'a', name: 'X', sites: ['doda'], url: 'https://x.jp', memo: 'm', fields: [{ id: 'f', title: '逆質問', body: 'b' }] })];
   const sessions = [mkSession({ id: 's1' })];
   const text = JSON.stringify(toBackup(list, sessions));
   assert.deepEqual(parseBackup(text), { companies: list, sessions });
@@ -111,7 +113,7 @@ test('backup round trip with sessions', () => {
 test('parseBackup reads old version-1 files (companies only)', () => {
   const list = [mk({ id: 'a' })];
   const v1 = JSON.stringify({ format: BACKUP_FORMAT, version: 1, exportedAt: 'x', companies: list });
-  assert.deepEqual(parseBackup(v1), { companies: list, sessions: [] });
+  assert.deepEqual(parseBackup(v1), { companies: list.map((c) => ({ ...c, fields: [] })), sessions: [] });
 });
 
 test('parseBackup rejects broken files', () => {
@@ -207,4 +209,40 @@ test('pickNewer keeps only missing or newer items', () => {
   assert.deepEqual(pickNewer(existing, incoming).map((x) => x.id), ['b', 'c', 'a2']);
   assert.deepEqual(pickNewer(existing, [{ ...existing[0] }]), []);
   assert.equal(pickNewer([], incoming).length, 4);
+});
+
+test('custom fields: normalize drops empty, keeps order and ids', () => {
+  const input = normalizeInput({
+    name: 'A',
+    fields: [
+      { id: 'f1', title: ' 逆質問 ', body: '残業は？\n\n' },
+      { id: 'f2', title: '', body: '   ' },
+      { title: '志望動機', body: '' },
+      { id: 'f1', title: '重複ID', body: 'x' },
+    ],
+  });
+  assert.deepEqual(input.fields.map((f) => f.title), ['逆質問', '志望動機', '重複ID']);
+  assert.equal(input.fields[0].id, 'f1');
+  assert.equal(input.fields[0].body, '残業は？');
+  assert.ok(input.fields[1].id && input.fields[2].id !== 'f1');
+  assert.deepEqual(normalizeInput({ name: 'B' }).fields, []);
+});
+
+test('custom fields: validate requires a title when body is written', () => {
+  const input = normalizeInput({ name: 'A', fields: [{ id: 'x', title: '', body: '内容だけ' }] });
+  assert.equal(validate(input)['field:x'], '項目名を入力してください');
+  const long = normalizeInput({ name: 'A', fields: [{ id: 'y', title: 'あ'.repeat(51), body: '' }] });
+  assert.match(validate(long)['field:y'], /50文字/);
+});
+
+test('custom fields: search, used titles and backup round trip', () => {
+  const a = { ...mk({ id: 'a', name: 'A社' }), fields: [{ id: '1', title: '逆質問', body: 'リモートワークの頻度' }] };
+  const b = { ...mk({ id: 'b', name: 'B社' }), fields: [{ id: '2', title: '逆質問', body: '' }, { id: '3', title: '自己PR', body: '' }] };
+  const old = mk({ id: 'c', name: 'C社' }); // fields が無い古いデータ
+  assert.deepEqual(filterCompanies([a, b, old], { query: 'リモート' }).map((c) => c.id), ['a']);
+  assert.deepEqual(usedFieldTitles([a, b, old]), ['逆質問', '自己PR']);
+  assert.deepEqual(fieldsOf(old), []);
+  const back = parseBackup(JSON.stringify(toBackup([a, old], [])));
+  assert.deepEqual(back.companies[0].fields, a.fields);
+  assert.deepEqual(back.companies[1].fields, []);
 });

@@ -11,6 +11,8 @@ export const PRESET_SITES = [
 ];
 
 export const NAME_MAX = 100;
+/** 自分で作る項目（逆質問・志望動機など）の項目名の長さの上限 */
+export const FIELD_TITLE_MAX = 50;
 export const BACKUP_FORMAT = 'job-change-app-backup';
 export const BACKUP_VERSION = 2;
 
@@ -35,8 +37,28 @@ export function normalizeInput(input) {
     sites: cleanSites,
     url: String(input.url ?? '').trim(),
     memo: String(input.memo ?? '').replace(/\s+$/, ''),
+    fields: normalizeFields(input.fields),
   };
 }
+
+/** 自分で作る項目を整形する（項目名も内容も空の項目は捨てる。id が無ければ振る） */
+export function normalizeFields(fields) {
+  if (!Array.isArray(fields)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const f of fields) {
+    const title = String(f?.title ?? '').trim();
+    const body = String(f?.body ?? '').replace(/\s+$/, '').replace(/^\s*\n/, '');
+    if (!title && !body.trim()) continue;
+    const id = typeof f?.id === 'string' && f.id && !seen.has(f.id) ? f.id : newId();
+    seen.add(id);
+    out.push({ id, title, body });
+  }
+  return out;
+}
+
+/** 会社の項目一覧（古いデータには fields が無いので空にする） */
+export const fieldsOf = (c) => (Array.isArray(c?.fields) ? c.fields : []);
 
 /** 入力チェック。問題があれば { 項目名: メッセージ } を返す。問題なしなら空オブジェクト */
 export function validate(input) {
@@ -48,6 +70,11 @@ export function validate(input) {
   }
   if (input.url && !isHttpUrl(input.url)) {
     errors.url = 'http:// または https:// で始まるURLを入力してください';
+  }
+  // 項目のエラーは `field:{項目のid}` に入れる（画面の行と対応させるため）
+  for (const f of input.fields ?? []) {
+    if (!f.title) errors[`field:${f.id}`] = '項目名を入力してください';
+    else if (f.title.length > FIELD_TITLE_MAX) errors[`field:${f.id}`] = `項目名は${FIELD_TITLE_MAX}文字以内にしてください`;
   }
   return errors;
 }
@@ -76,12 +103,14 @@ export function updateCompany(existing, input, now = new Date()) {
   return { ...existing, ...input, id: existing.id, createdAt: existing.createdAt, updatedAt: now.toISOString() };
 }
 
-/** 検索語（会社名・メモ）とサイトで絞り込み、更新が新しい順に並べる */
+/** 検索語（会社名・メモ・自分で作った項目）とサイトで絞り込み、更新が新しい順に並べる */
 export function filterCompanies(companies, { query = '', site = '' } = {}) {
   const q = query.trim().toLowerCase();
+  const hit = (c) =>
+    [c.name, c.memo, ...fieldsOf(c).flatMap((f) => [f.title, f.body])].some((t) => String(t ?? '').toLowerCase().includes(q));
   return companies
     .filter((c) => !site || c.sites.includes(site))
-    .filter((c) => !q || c.name.toLowerCase().includes(q) || c.memo.toLowerCase().includes(q))
+    .filter((c) => !q || hit(c))
     .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
 }
 
@@ -91,6 +120,15 @@ export function usedSites(companies) {
   const preset = PRESET_SITES.filter((s) => used.has(s));
   const others = [...used].filter((s) => !PRESET_SITES.includes(s)).sort((a, b) => a.localeCompare(b, 'ja'));
   return [...preset, ...others];
+}
+
+/** これまでに使った項目名（よく使う順 → 同数なら名前順）。他の会社で追加するときの候補にする */
+export function usedFieldTitles(companies) {
+  const count = new Map();
+  for (const c of companies) {
+    for (const t of new Set(fieldsOf(c).map((f) => f.title).filter(Boolean))) count.set(t, (count.get(t) ?? 0) + 1);
+  }
+  return [...count].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'ja')).map(([t]) => t);
 }
 
 /* ---------- 面接・セミナー記録 ---------- */

@@ -309,4 +309,7 @@ button:disabled { opacity: 0.6; }
 .field-suggest { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
 .field-suggest:empty { display: none; }
 .custom-field-row .field-title-input { padding: 10px 12px; border-radius: 10px; background: var(--bg); }
-.custom-field-row .field-body-input { min-height: 96px; }
+.custom-field-row .field-body-input { min-height: 180px; }
+
+/* 入力欄は中身に合わせて伸びる（app.js の autoGrow）ので、中のスクロールバーは出さない */
+.field textarea, .qa-row textarea { overflow-y: hidden; }

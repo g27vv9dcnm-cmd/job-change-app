@@ -4,6 +4,10 @@ import { readLegacyCompanies } from './legacy.js';
 import {
   PRESET_SITES,
   NAME_MAX,
+  FIELD_TITLE_MAX,
+  fieldsOf,
+  usedFieldTitles,
+  newId,
   TITLE_MAX,
   SESSION_TYPES,
   filterCompanies,
@@ -320,6 +324,14 @@ function renderDetail(id) {
           : h('span', { class: 'muted' }, '未登録'),
       ),
       h('div', {}, h('div', { class: 'detail-label' }, 'メモ'), c.memo ? h('div', { class: 'pre' }, c.memo) : h('span', { class: 'muted' }, '未登録')),
+      fieldsOf(c).map((f) =>
+        h(
+          'div',
+          { class: 'custom-field' },
+          h('div', { class: 'custom-field-title' }, f.title),
+          f.body ? h('div', { class: 'pre' }, f.body) : h('span', { class: 'muted' }, '未記入'),
+        ),
+      ),
       h('div', { class: 'detail-meta' }, `登録 ${fmt(c.createdAt)}・更新 ${fmt(c.updatedAt)}`),
     ),
     h(
@@ -396,6 +408,7 @@ function renderForm(id) {
   memoInput.value = existing?.memo ?? '';
   const nameErr = h('div', { class: 'error', role: 'alert' });
   const urlErr = h('div', { class: 'error', role: 'alert' });
+  const fields = fieldsEditor(fieldsOf(existing), usedFieldTitles(store.getAll()));
 
   const optionsEl = h('div', { class: 'site-options', role: 'group', 'aria-label': '利用サイト' });
   const drawSites = () => {
@@ -444,6 +457,7 @@ function renderForm(id) {
       sites: siteChoices.filter((s) => selected.has(s)),
       url: urlInput.value,
       memo: memoInput.value,
+      fields: fields.value(),
     };
     try {
       const saved = existing ? store.update(existing.id, input) : store.add(input);
@@ -452,7 +466,11 @@ function renderForm(id) {
       render();
     } catch (err) {
       if (err instanceof store.ValidationError) {
-        showErrors(err.errors, { name: { input: nameInput, error: nameErr }, url: { input: urlInput, error: urlErr } });
+        showErrors(err.errors, {
+          name: { input: nameInput, error: nameErr },
+          url: { input: urlInput, error: urlErr },
+          ...fields.errorTargets(),
+        });
       } else {
         toast(err.message);
       }
@@ -470,6 +488,7 @@ function renderForm(id) {
       ]),
       field('求人URL', [urlInput, urlErr], { forId: 'f-url' }),
       field('メモ', memoInput, { forId: 'f-memo' }),
+      h('div', { class: 'field' }, h('span', { class: 'label' }, '自分で作る項目'), fields.el),
       h(
         'div',
         { class: 'actions' },
@@ -479,6 +498,100 @@ function renderForm(id) {
     ),
   );
   if (!existing) nameInput.focus();
+}
+
+/** はじめて使うときに出す項目名の候補 */
+const FIELD_SUGGESTIONS = ['逆質問', '志望動機', '自己PR', '面接で言うこと'];
+
+/** 項目名と内容の組（逆質問・志望動機など）を自由に追加・削除・並べ替えできる部品 */
+function fieldsEditor(initial, usedTitles) {
+  const rowsEl = h('div', { class: 'qa-rows' });
+  const suggestEl = h('div', { class: 'field-suggest' });
+  const rows = [];
+
+  const redraw = () => {
+    rowsEl.replaceChildren(...rows.map((r) => r.row));
+    rows.forEach((r, i) => {
+      r.up.disabled = i === 0;
+      r.down.disabled = i === rows.length - 1;
+    });
+    drawSuggestions();
+  };
+  const move = (entry, d) => {
+    const i = rows.indexOf(entry);
+    const j = i + d;
+    if (j < 0 || j >= rows.length) return;
+    [rows[i], rows[j]] = [rows[j], rows[i]];
+    redraw();
+    // 押したボタンにフォーカスを残す（端まで来て押せなくなったら反対側のボタンへ）
+    const btn = d < 0 ? entry.up : entry.down;
+    (btn.disabled ? (d < 0 ? entry.down : entry.up) : btn).focus();
+  };
+  const addRow = (f = {}, focus = null) => {
+    const title = h('input', {
+      type: 'text',
+      class: 'field-title-input',
+      maxlength: String(FIELD_TITLE_MAX),
+      placeholder: '項目名（例：逆質問）',
+      'aria-label': '項目名',
+      autocomplete: 'off',
+      value: f.title ?? '',
+      oninput: () => drawSuggestions(),
+    });
+    const body = h('textarea', { class: 'field-body-input', rows: '4', placeholder: '内容', 'aria-label': '内容' });
+    body.value = f.body ?? '';
+    const error = h('div', { class: 'error', role: 'alert' });
+    const up = h('button', { class: 'icon-mini', type: 'button', 'aria-label': '上へ', title: '上へ', onclick: () => move(entry, -1) }, '↑');
+    const down = h('button', { class: 'icon-mini', type: 'button', 'aria-label': '下へ', title: '下へ', onclick: () => move(entry, 1) }, '↓');
+    const del = h(
+      'button',
+      {
+        class: 'link-btn danger',
+        type: 'button',
+        onclick: () => {
+          rows.splice(rows.indexOf(entry), 1);
+          redraw();
+        },
+      },
+      'この項目を消す',
+    );
+    const row = h(
+      'div',
+      { class: 'qa-row custom-field-row' },
+      h('div', { class: 'qa-row-head' }, h('div', { class: 'row-move' }, up, down), del),
+      title,
+      error,
+      body,
+    );
+    const entry = { id: f.id || newId(), row, title, body, error, up, down };
+    rows.push(entry);
+    redraw();
+    if (focus === 'title') title.focus();
+    if (focus === 'body') body.focus();
+  };
+  function drawSuggestions() {
+    const have = new Set(rows.map((r) => r.title.value.trim()));
+    const titles = [...new Set([...usedTitles, ...FIELD_SUGGESTIONS])].filter((t) => !have.has(t)).slice(0, 8);
+    suggestEl.replaceChildren(
+      ...(titles.length ? [h('span', { class: 'muted small' }, '候補：')] : []),
+      ...titles.map((t) => h('button', { class: 'site-option', type: 'button', onclick: () => addRow({ title: t }, 'body') }, `＋ ${t}`)),
+    );
+  }
+
+  initial.forEach((f) => addRow(f));
+  redraw();
+  const el = h(
+    'div',
+    {},
+    rowsEl,
+    h('button', { class: 'btn btn-small btn-add', type: 'button', onclick: () => addRow({}, 'title') }, '＋ 項目を追加'),
+    suggestEl,
+  );
+  return {
+    el,
+    value: () => rows.map((r) => ({ id: r.id, title: r.title.value, body: r.body.value })),
+    errorTargets: () => Object.fromEntries(rows.map((r) => [`field:${r.id}`, { input: r.title, error: r.error }])),
+  };
 }
 
 /* ---------- 面接・セミナー記録の詳細 ---------- */

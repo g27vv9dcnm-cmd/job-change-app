@@ -290,3 +290,23 @@ button:disabled { opacity: 0.6; }
 .sync-status[data-status="synced"]::before { color: #2e9d57; }
 .sync-status[data-status="pending"]::before { color: #e0a100; }
 .sync-status[data-status="offline"]::before { color: var(--muted); }
+
+/* 自分で作る項目 */
+.custom-field-title { font-size: 13px; color: var(--muted); margin-bottom: 4px; word-break: break-word; }
+.custom-field-row .field-title-input { font-weight: 600; }
+.row-move { display: flex; gap: 6px; }
+.icon-mini {
+  width: 36px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 15px;
+  cursor: pointer;
+}
+.icon-mini:disabled { opacity: 0.35; cursor: default; }
+.field-suggest { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.field-suggest:empty { display: none; }
+.custom-field-row .field-title-input { padding: 10px 12px; border-radius: 10px; background: var(--bg); }
+.custom-field-row .field-body-input { min-height: 96px; }

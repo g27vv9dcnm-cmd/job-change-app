@@ -5,6 +5,7 @@
 //
 // Firestore の端末内キャッシュを使うので、圏外でも読み書きでき、つながると自動で同期される。
 // 書き込みはサーバーの返事を待たずに画面へ反映し、失敗したときだけ onError で知らせる。
+// まとめて書き込む importData だけは、保存の成否を Promise で返す。
 import * as fb from '../vendor/firebase.js';
 import { firebaseConfig, useEmulator } from './firebase-config.js';
 import {
@@ -35,6 +36,7 @@ let unsubs = [];
 let companies = new Map();
 let sessions = new Map();
 const status = { companiesPending: false, sessionsPending: false, fromCache: true };
+let readError = null; // 読み込みが断られたときのエラー（購読はそこで止まる）
 
 const dataListeners = new Set();
 const statusListeners = new Set();
@@ -46,9 +48,10 @@ export const onError = (fn) => (errorListeners.add(fn), () => errorListeners.del
 
 const emitData = () => dataListeners.forEach((fn) => fn());
 const emitStatus = () => statusListeners.forEach((fn) => fn(syncStatus()));
-const emitError = (err) => {
+/** kind: 'write'（保存の失敗）| 'read'（読み込みの失敗） */
+const emitError = (err, kind = 'write') => {
   console.error(err);
-  errorListeners.forEach((fn) => fn(err));
+  errorListeners.forEach((fn) => fn(err, kind));
 };
 
 export function isConfigured() {
@@ -79,6 +82,10 @@ export function init() {
 /** ログイン状態が変わるたびに呼ばれる（起動直後にも1回呼ばれる） */
 export function onAuth(fn) {
   return fb.onAuthStateChanged(auth, fn);
+}
+
+export function currentUid() {
+  return uid;
 }
 
 export function currentEmail() {
@@ -122,11 +129,13 @@ export function authErrorMessage(err) {
   }
 }
 
-/** 保存エラーを日本語にする */
-export function saveErrorMessage(err) {
+/** 保存・読み込みエラーを日本語にする */
+export function saveErrorMessage(err, kind = 'write') {
+  const what = kind === 'read' ? 'データを読み込めませんでした' : '保存できませんでした';
   if (err?.code === 'permission-denied') {
-    return '保存できませんでした。Firebase のルール設定を確認してください';
+    return `${what}。Firebase のルール設定を確認してください`;
   }
+  if (kind === 'read') return `${what}（${err?.code || err?.message || '不明なエラー'}）`;
   if (err?.code === 'resource-exhausted') {
     return '保存できませんでした。Firebase の無料枠の上限に達した可能性があります';
   }
@@ -161,7 +170,9 @@ export function startSync(user) {
           emitStatus();
         },
         (err) => {
-          emitError(err);
+          readError = err;
+          emitError(err, 'read');
+          emitStatus();
           if (!firstLoaded[name]) {
             firstLoaded[name] = true;
             if (firstLoaded.companies && firstLoaded.sessions) resolve();
@@ -181,6 +192,24 @@ export function stopSync() {
   uid = null;
   companies = new Map();
   sessions = new Map();
+  Object.assign(status, { companiesPending: false, sessionsPending: false, fromCache: true });
+  readError = null;
+  emitStatus();
+}
+
+/** サーバーから最新のデータが届くまで待つ（圏外ならつながるまで待つ）。読み込みを断られたら reject */
+export function waitForServer() {
+  const startUid = uid;
+  return new Promise((resolve, reject) => {
+    const check = () => {
+      if (uid !== startUid) return reject(new Error('signed-out')), true;
+      if (readError) return reject(readError), true;
+      if (!status.fromCache) return resolve(), true;
+      return false;
+    };
+    if (check()) return;
+    const off = onStatus(() => check() && off());
+  });
 }
 
 /** 同期の状態: 'pending'（未送信の変更あり）| 'offline'（サーバー未確認）| 'synced' */
@@ -283,18 +312,25 @@ export function previewImport(text) {
   };
 }
 
-/** まとめて書き込む（同じIDは上書き、それ以外は追加）。1回の書き込みは500件までなので分ける */
+/**
+ * まとめて書き込む（同じIDは上書き、それ以外は追加）。1回の書き込みは500件までなので分ける。
+ * 画面にはすぐ反映し、戻り値の Promise はサーバーへの保存が確定したら resolve、断られたら reject する
+ * （圏外のときはつながるまで待つ）。保存の成否で動きを変えたいときは await すること。
+ */
 export function importData({ companies: cs, sessions: ss }) {
   const writes = [
     ...cs.map((c) => ['companies', c]),
     ...ss.map((s) => ['sessions', s]),
   ];
+  const commits = [];
   for (let i = 0; i < writes.length; i += 400) {
     const batch = fb.writeBatch(db);
     for (const [name, item] of writes.slice(i, i + 400)) {
       batch.set(userDoc(name, item.id), item);
       (name === 'companies' ? companies : sessions).set(item.id, item);
     }
-    fire(batch.commit());
+    commits.push(batch.commit());
   }
+  if (commits.length) emitData();
+  return Promise.all(commits);
 }

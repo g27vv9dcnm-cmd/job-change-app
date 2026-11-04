@@ -15,6 +15,7 @@ import {
   toBackup,
   parseBackup,
   backupFileName,
+  pickNewer,
 } from './model.js';
 
 const view = document.getElementById('view');
@@ -743,6 +744,24 @@ function renderSettings() {
       fileInput,
     ),
   );
+  showLegacySection();
+}
+
+/** この端末に同期前のデータが残っていれば、クラウドに移すボタンを出す */
+async function showLegacySection() {
+  const anchor = view.firstChild;
+  const legacy = await readLegacyCompanies().catch(() => []);
+  if (!legacy.length || !anchor?.isConnected) return;
+  view.insertBefore(
+    h(
+      'section',
+      { class: 'section', 'data-legacy': '' },
+      h('h2', {}, 'この端末の以前のデータ'),
+      h('p', {}, `同期を入れる前にこの端末だけに保存した会社が${legacy.length}件残っています。クラウドに無いもの・クラウドより新しいものだけを移します。`),
+      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => migrateLegacy({ fromSettings: true }) }, 'クラウドに移す'),
+    ),
+    anchor.nextSibling,
+  );
 }
 
 async function onSignOut() {
@@ -795,37 +814,88 @@ async function onImport(file) {
     '読み込む',
   );
   if (!ok) return;
-  store.importData(preview.data);
-  toast('読み込みました');
   go('#/');
+  await saveToCloud(preview.data, '読み込みました');
+}
+
+/**
+ * まとめて保存し、サーバーに届いたのを確認してから完了を知らせる。
+ * 成功したら true、断られたら false。
+ */
+async function saveToCloud(data, doneMessage) {
+  toast(navigator.onLine ? 'クラウドに保存中…' : 'オフラインです。ネットにつながると送信されます', 600000);
+  try {
+    await store.importData(data);
+    toast(doneMessage);
+    return true;
+  } catch (err) {
+    console.error(err);
+    toast(store.saveErrorMessage(err), 8000);
+    return false;
+  }
 }
 
 /* ---------- 以前の版（端末内保存）からの移行 ---------- */
+// 以前の版は移行に成功したか確かめずに「移行済み」にしていたので、キーを変えてもう一度確認する。
+const legacyKey = (uid) => `legacy-migrated-v2:${uid}`;
+let migrating = false;
+
+/** ログイン直後に、まだ移していない以前のデータがあれば移すか聞く */
 async function maybeMigrateLegacy(user) {
-  const key = `legacy-migrated:${user.uid}`;
-  if (lsGet(key)) return;
-  const legacy = await readLegacyCompanies();
-  if (!legacy.length) {
-    lsSet(key, 'none');
-    return;
-  }
-  let data;
+  if (lsGet(legacyKey(user.uid))) return;
+  await migrateLegacy({ fromSettings: false });
+}
+
+/**
+ * 以前のデータのうちクラウドに無い・より新しいものを移す。
+ * サーバーへの保存を確認できたときだけ「移行済み」と記録する。
+ */
+async function migrateLegacy({ fromSettings }) {
+  if (migrating) return;
+  migrating = true;
   try {
-    data = parseBackup(JSON.stringify(toBackup(legacy, [])));
-  } catch (err) {
-    toast(`この端末の以前のデータを読み込めませんでした（${err.message}）`, 4000);
-    return;
+    const legacy = await readLegacyCompanies().catch(() => []);
+    if (!legacy.length) {
+      const uid = store.currentUid();
+      if (!fromSettings && uid) lsSet(legacyKey(uid), 'none');
+      return;
+    }
+    let data;
+    try {
+      data = parseBackup(JSON.stringify(toBackup(legacy, [])));
+    } catch (err) {
+      toast(`この端末の以前のデータを読み込めませんでした（${err.message}）`, 5000);
+      return;
+    }
+    if (fromSettings && !navigator.onLine) {
+      toast('オフラインです。ネットにつながってから試してください', 4000);
+      return;
+    }
+    // 端末のキャッシュではなく、クラウドの最新の状態と比べる
+    try {
+      await store.waitForServer();
+    } catch {
+      return; // 読み込めなかったことはすでに表示している。次に開いたときにまた確かめる
+    }
+    const uid = store.currentUid();
+    if (!uid) return;
+    const toMove = pickNewer(store.getAll(), data.companies);
+    if (!toMove.length) {
+      lsSet(legacyKey(uid), 'done');
+      if (fromSettings) toast('以前のデータはすべてクラウドに入っています');
+      return;
+    }
+    const ok = await confirmDialog(
+      `この端末に、同期を入れる前のデータが${toMove.length}社分残っています。クラウドに移して、パソコンでも見られるようにしますか？`,
+      '移す',
+      { cancelLabel: '今はしない' },
+    );
+    if (!ok || store.currentUid() !== uid) return;
+    const saved = await saveToCloud({ companies: toMove, sessions: [] }, `${toMove.length}社をクラウドに移しました`);
+    if (saved) lsSet(legacyKey(uid), 'done');
+  } finally {
+    migrating = false;
   }
-  const ok = await confirmDialog(
-    `この端末に、同期を入れる前のデータ（${data.companies.length}社）が残っています。クラウドに移して、パソコンでも見られるようにしますか？`,
-    '移す',
-    { cancelLabel: '今はしない' },
-  );
-  if (!ok) return;
-  store.importData(data);
-  lsSet(key, 'done');
-  toast(`${data.companies.length}社をクラウドに移しました`);
-  if (refreshView) refreshView();
 }
 
 function renderNotFound(message) {
@@ -885,7 +955,7 @@ function start() {
   store.init();
   store.onData(() => refreshView?.());
   store.onStatus(() => refreshStatus?.());
-  store.onError((err) => toast(store.saveErrorMessage(err), 5000));
+  store.onError((err, kind) => toast(store.saveErrorMessage(err, kind), 6000));
   store.onAuth(async (user) => {
     if (!user) {
       signedIn = false;

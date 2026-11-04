@@ -258,3 +258,15 @@ export function countImport(existing, incoming) {
   }
   return { added, updated };
 }
+
+/**
+ * incoming のうち、existing に無いもの・existing より新しいもの（updatedAt が後）だけを返す。
+ * 端末に残った古いデータでクラウドの新しいデータを上書きしないために使う。
+ */
+export function pickNewer(existing, incoming) {
+  const byId = new Map(existing.map((x) => [x.id, x]));
+  return incoming.filter((x) => {
+    const cur = byId.get(x.id);
+    return !cur || String(x.updatedAt ?? '') > String(cur.updatedAt ?? '');
+  });
+}

@@ -20,6 +20,15 @@ import {
   parseBackup,
   backupFileName,
   pickNewer,
+  MARK_TYPES,
+  normalizeMarks,
+  toggleMark,
+  clearMarks,
+  markSegments,
+  removedFields,
+  trashLabel,
+  trashDaysLeft,
+  TRASH_DAYS,
 } from './model.js';
 
 const view = document.getElementById('view');
@@ -62,11 +71,59 @@ function setHeader(title, { back = false, settings = true, add = false } = {}) {
 }
 
 let toastTimer;
-function toast(message, ms = 2500) {
-  toastEl.textContent = message;
+/** 'view' のボタンは画面が変わったら消す（消した行を戻すボタンなど、その画面でしか意味がないもの） */
+let toastScope = null;
+/**
+ * 画面下に短いお知らせを出す。action を渡すとボタン（「元に戻す」など）も出す。
+ * action: { label, onClick, scope: 'view' | 'global' }
+ */
+function toast(message, ms = 2500, action = null) {
+  toastEl.replaceChildren(h('span', { class: 'toast-text' }, message));
+  if (action) {
+    toastEl.append(
+      h(
+        'button',
+        {
+          class: 'toast-action',
+          type: 'button',
+          onclick: () => {
+            hideToast();
+            action.onClick();
+          },
+        },
+        action.label,
+      ),
+    );
+  }
+  toastEl.classList.toggle('has-action', Boolean(action));
+  toastScope = action ? action.scope ?? 'global' : null;
   toastEl.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (toastEl.hidden = true), ms);
+  toastTimer = setTimeout(hideToast, ms);
+}
+function hideToast() {
+  toastEl.hidden = true;
+  toastScope = null;
+}
+
+/** 消した直後に「元に戻す」を出す時間 */
+const UNDO_MS = 6000;
+
+/** ゴミ箱に移したものを「元に戻す」ボタンつきで知らせる */
+function toastUndoTrash(message, trashId, afterRestore) {
+  toast(message, UNDO_MS, {
+    label: '元に戻す',
+    scope: 'global',
+    onClick: () => {
+      try {
+        const where = store.restoreTrash(trashId);
+        toast('元に戻しました');
+        afterRestore?.(where);
+      } catch (err) {
+        toast(err.message, 5000);
+      }
+    },
+  });
 }
 
 function confirmDialog(message, okLabel = 'OK', { danger = false, cancelLabel = 'キャンセル' } = {}) {
@@ -123,10 +180,10 @@ function chips(items) {
   return h('div', { class: 'chips' }, items.map((s) => h('span', { class: 'chip' }, s)));
 }
 
-function field(label, content, { required = false, forId = null } = {}) {
+function field(label, content, { required = false, forId = null, focus = null, focusSel = null } = {}) {
   return h(
     'div',
-    { class: 'field' },
+    { class: 'field', 'data-focus': focus, 'data-focus-sel': focusSel },
     forId
       ? h('label', { for: forId }, label, required ? h('span', { class: 'req' }, '必須') : null)
       : h('span', { class: 'label' }, label),
@@ -146,6 +203,385 @@ function showErrors(errors, map) {
     }
   }
   first?.focus();
+}
+
+/* ---------- 見ている項目から編集を開く ---------- */
+/** 次に開く編集画面で、自動でスクロールして入力を始める場所（data-focus の値） */
+let pendingFocus = null;
+
+function editAt(hash, target) {
+  pendingFocus = target;
+  go(hash);
+}
+
+/** 詳細画面の見出しの横に置く「✎」ボタン */
+function editBtn(label, onClick) {
+  return h('button', { class: 'edit-mini', type: 'button', 'aria-label': `${label}を編集`, title: `${label}を編集`, onclick: onClick }, '✎');
+}
+
+/** 見出し＋✎ */
+function labelRow(label, onEdit) {
+  return h('div', { class: 'detail-label-row' }, h('span', { class: 'detail-label' }, label), editBtn(label, onEdit));
+}
+
+function placeCaretAtEnd(el) {
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  range.collapse(false);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+/** 編集画面を開いた直後に、✎ を押した項目までスクロールして入力できる状態にする */
+function applyPendingFocus() {
+  const target = pendingFocus;
+  pendingFocus = null;
+  if (!target) return;
+  const el = [...view.querySelectorAll('[data-focus]')].find((e) => e.dataset.focus === target);
+  if (!el) return;
+  const pick = (sel) => (el.matches(sel) ? el : el.querySelector(sel));
+  const input = el.dataset.focusSel ? pick(el.dataset.focusSel) : pick('.rich-input') || pick('textarea, input, button');
+  requestAnimationFrame(() => {
+    el.scrollIntoView({ block: 'center' });
+    if (!input) return;
+    input.focus({ preventScroll: true });
+    if (input.isContentEditable) placeCaretAtEnd(input);
+    else if (typeof input.setSelectionRange === 'function' && input.type !== 'date' && input.type !== 'url') {
+      const n = input.value.length;
+      input.setSelectionRange(n, n);
+    }
+  });
+}
+
+/* ---------- 色付きの文章（黄マーカー・赤文字・太字） ---------- */
+const MARK_CLASS = { hl: 'm-hl', red: 'm-red', bold: 'm-bold' };
+const MARK_BUTTONS = [
+  { type: 'hl', label: 'マーカー', title: '黄色のマーカーを引く' },
+  { type: 'red', label: '赤', title: '赤い文字にする' },
+  { type: 'bold', label: '太字', title: '太字にする' },
+  { type: 'clear', label: '色を消す', title: '選んだ部分の色や太字を消す' },
+];
+
+function markedNode(text, types) {
+  return types.length ? h('span', { class: types.map((t) => MARK_CLASS[t]).join(' ') }, text) : text;
+}
+
+/** 表示用：色付きの文章 */
+function richView(text, marks) {
+  return h('div', { class: 'pre' }, markSegments(text, marks ?? []).map((seg) => markedNode(seg.text, seg.types)));
+}
+
+const BLOCK_TAGS = new Set(['DIV', 'P', 'LI', 'UL', 'OL', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'PRE']);
+const isBlock = (el) => BLOCK_TAGS.has(el.nodeName);
+
+/** 行の終わりに置かれただけの <br>（改行ではなく、空の行に高さを持たせるためのもの）か */
+function isTrailingBr(br, root) {
+  let n = br;
+  for (;;) {
+    let next = n.nextSibling;
+    while (next && next.nodeType === Node.TEXT_NODE && next.data === '') next = next.nextSibling;
+    if (next) return false;
+    const p = n.parentNode;
+    if (!p || p === root || isBlock(p)) return true;
+    n = p;
+  }
+}
+
+/** ブラウザが付けた書式（コピーや行の結合で付くもの）を、アプリの3種類に読み替える */
+function stylesOf(el, inherited, colors) {
+  const s = new Set(inherited);
+  const cl = el.classList;
+  if (cl?.contains('m-hl') || el.nodeName === 'MARK') s.add('hl');
+  if (cl?.contains('m-red')) s.add('red');
+  if (cl?.contains('m-bold') || el.nodeName === 'B' || el.nodeName === 'STRONG') s.add('bold');
+  const st = el.style;
+  if (st) {
+    const fw = st.fontWeight;
+    if (fw === 'bold' || fw === 'bolder' || Number(fw) >= 600) s.add('bold');
+    if (st.backgroundColor && colors.hl.has(st.backgroundColor)) s.add('hl');
+    if (st.color && colors.red.has(st.color)) s.add('red');
+  }
+  return s;
+}
+
+/** 今の画面の色（ライト・ダーク）で、マーカーと赤文字が実際に何色かを調べる */
+function markColors(root) {
+  const probeHl = h('span', { class: 'm-hl' });
+  const probeRed = h('span', { class: 'm-red' });
+  const box = h('span', { style: 'position:absolute;visibility:hidden' }, probeHl, probeRed);
+  root.append(box);
+  const colors = { hl: new Set([getComputedStyle(probeHl).backgroundColor]), red: new Set([getComputedStyle(probeRed).color]) };
+  box.remove();
+  return colors;
+}
+
+/**
+ * 入力欄の中身を { text, marks } に読み取る。
+ * points（[{ node, offset }]）を渡すと、その位置が文章の何文字目かを pos に入れる（選択範囲の変換用）。
+ */
+function readRich(root, points = []) {
+  const colors = markColors(root);
+  let text = '';
+  const runs = [];
+  let lineDirty = false;
+  let closeBlock = false;
+  const pending = [];
+  const flush = () => {
+    for (const p of pending.splice(0)) p.pos = text.length;
+  };
+  const newLine = () => {
+    text += '\n';
+    lineDirty = false;
+  };
+  const breakAfterBlock = () => {
+    if (closeBlock) {
+      newLine();
+      closeBlock = false;
+    }
+  };
+  const visit = (node, styles) => {
+    const kids = [...node.childNodes];
+    kids.forEach((child, i) => {
+      for (const p of points) if (p.pos == null && p.node === node && p.offset === i) pending.push(p);
+      if (child.nodeType === Node.TEXT_NODE) {
+        const data = child.data.replace(/ /g, ' ');
+        if (!data) {
+          for (const p of points) if (p.pos == null && p.node === child) pending.push(p);
+          return;
+        }
+        breakAfterBlock();
+        flush();
+        const start = text.length;
+        for (const p of points) if (p.pos == null && p.node === child) p.pos = start + Math.min(p.offset, data.length);
+        text += data;
+        lineDirty = true;
+        if (styles.size) runs.push({ s: start, e: text.length, types: [...styles] });
+      } else if (child.nodeName === 'BR') {
+        if (isTrailingBr(child, root)) return;
+        breakAfterBlock();
+        flush();
+        newLine();
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        const block = isBlock(child);
+        if (block) {
+          if (closeBlock) {
+            newLine();
+            closeBlock = false;
+          } else if (lineDirty) newLine();
+        }
+        visit(child, stylesOf(child, styles, colors));
+        if (block) {
+          flush();
+          closeBlock = true;
+        }
+      }
+    });
+    for (const p of points) if (p.pos == null && p.node === node && p.offset >= kids.length) pending.push(p);
+  };
+  visit(root, new Set());
+  flush();
+  for (const p of points) if (p.pos == null) p.pos = text.length;
+  const marks = runs.flatMap((r) => r.types.map((t) => ({ s: r.s, e: r.e, t })));
+  return { text, marks: normalizeMarks(marks, text.length) };
+}
+
+/** アプリが作る要素（行の div、br、色の span）以外が混ざったか */
+function hasForeignMarkup(root) {
+  for (const el of root.querySelectorAll('*')) {
+    if (el.nodeName === 'BR') continue;
+    if (el.nodeName === 'DIV' && el.parentNode === root && !el.attributes.length) continue;
+    if (el.nodeName === 'SPAN' && !el.hasAttribute('style') && el.classList.length && [...el.classList].every((c) => c.startsWith('m-'))) continue;
+    return true;
+  }
+  return false;
+}
+
+/** 選択範囲を覚えておく入力欄（ボタンを押すと選択が外れる端末のため） */
+let activeRichEditor = null;
+document.addEventListener('selectionchange', () => {
+  if (activeRichEditor?.area.isConnected) activeRichEditor.saveRange();
+});
+
+/**
+ * 色を付けられる入力欄。文字を選んで「マーカー」「赤」「太字」を押すと、その場で色が付く。
+ * value() は { text, marks } を返す。
+ */
+function richEditor({ text = '', marks = [], placeholder = '', label = '', id = null } = {}) {
+  const area = h('div', {
+    class: 'rich-input',
+    contenteditable: 'true',
+    role: 'textbox',
+    'aria-multiline': 'true',
+    'aria-label': label || placeholder,
+    'data-placeholder': placeholder,
+    id,
+  });
+  let lines = []; // 描いた行と文字の位置（選択範囲を戻すため）
+  let lastRange = null;
+  let composing = false;
+
+  const updateEmpty = () => area.classList.toggle('is-empty', !area.textContent && area.querySelectorAll('br').length <= 1 && area.querySelectorAll('div').length <= 1);
+
+  function paint(t, ms, sel = null) {
+    lines = [];
+    const rows = [[]];
+    for (const seg of markSegments(t, ms)) {
+      seg.text.split('\n').forEach((piece, i) => {
+        if (i > 0) rows.push([]);
+        if (piece) rows[rows.length - 1].push({ text: piece, types: seg.types });
+      });
+    }
+    let pos = 0;
+    area.replaceChildren(
+      ...rows.map((row) => {
+        const div = h('div', {});
+        const info = { div, start: pos, nodes: [] };
+        if (!row.length) div.append(h('br'));
+        for (const piece of row) {
+          const tn = document.createTextNode(piece.text);
+          div.append(piece.types.length ? h('span', { class: piece.types.map((x) => MARK_CLASS[x]).join(' ') }, tn) : tn);
+          info.nodes.push({ node: tn, start: pos, end: pos + piece.text.length });
+          pos += piece.text.length;
+        }
+        info.end = pos;
+        lines.push(info);
+        pos += 1; // 改行の分
+        return div;
+      }),
+    );
+    updateEmpty();
+    if (sel) select(sel.start, sel.end);
+  }
+
+  function domPoint(pos) {
+    const line = lines.find((l) => pos >= l.start && pos <= l.end) ?? lines[lines.length - 1];
+    if (!line) return { node: area, offset: 0 };
+    const hit = line.nodes.find((n) => pos <= n.end);
+    if (!hit) return { node: line.div, offset: line.div.childNodes.length && line.div.firstChild.nodeName === 'BR' ? 0 : line.div.childNodes.length };
+    return { node: hit.node, offset: Math.max(0, pos - hit.start) };
+  }
+
+  function select(start, end) {
+    const a = domPoint(start);
+    const b = domPoint(end);
+    const range = document.createRange();
+    range.setStart(a.node, a.offset);
+    range.setEnd(b.node, b.offset);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    lastRange = range.cloneRange();
+  }
+
+  /** 今の選択範囲（入力欄の外にはみ出した分は端にそろえる） */
+  function currentRange() {
+    const sel = window.getSelection();
+    let range = sel.rangeCount ? sel.getRangeAt(0) : null;
+    if (!range || !area.contains(range.commonAncestorContainer)) {
+      // ボタンを押したときに選択が外れる端末もあるので、最後に選んでいた範囲を使う
+      range = lastRange && area.contains(lastRange.commonAncestorContainer) ? lastRange : null;
+    }
+    return range;
+  }
+
+  function applyMark(kind) {
+    const range = currentRange();
+    if (!range) return toast('色を付けたい文字を選んでください');
+    const pts = [
+      { node: range.startContainer, offset: range.startOffset },
+      { node: range.endContainer, offset: range.endOffset },
+    ];
+    const { text: t, marks: ms } = readRich(area, pts);
+    const start = Math.min(pts[0].pos, pts[1].pos);
+    const end = Math.max(pts[0].pos, pts[1].pos);
+    if (start === end) return toast('色を付けたい文字を選んでください');
+    const next = kind === 'clear' ? clearMarks(ms, start, end, t.length) : toggleMark(ms, start, end, kind, t.length);
+    paint(t, next, { start, end });
+  }
+
+  /** 書式の混ざった中身をアプリの形に描き直す（カーソルの位置は保つ） */
+  function tidy() {
+    if (composing || !hasForeignMarkup(area)) return;
+    const sel = window.getSelection();
+    const range = sel.rangeCount && area.contains(sel.getRangeAt(0).commonAncestorContainer) ? sel.getRangeAt(0) : null;
+    const pts = range
+      ? [
+          { node: range.startContainer, offset: range.startOffset },
+          { node: range.endContainer, offset: range.endOffset },
+        ]
+      : [];
+    const { text: t, marks: ms } = readRich(area, pts);
+    paint(t, ms, range ? { start: pts[0].pos, end: pts[1].pos } : null);
+  }
+
+  area.addEventListener('input', () => {
+    updateEmpty();
+    tidy();
+  });
+  area.addEventListener('compositionstart', () => (composing = true));
+  area.addEventListener('compositionend', () => {
+    composing = false;
+    tidy();
+  });
+  area.addEventListener('paste', (e) => {
+    // 貼り付けは文字だけにする（ほかのアプリの色や大きさを持ち込まない）
+    e.preventDefault();
+    const t = e.clipboardData?.getData('text/plain') ?? '';
+    if (t) document.execCommand('insertText', false, t);
+  });
+  area.addEventListener('drop', (e) => e.preventDefault());
+  area.addEventListener('beforeinput', (e) => {
+    if (e.inputType === 'formatBold') {
+      e.preventDefault();
+      applyMark('bold');
+    } else if (e.inputType.startsWith('format') || e.inputType === 'insertFromDrop') {
+      e.preventDefault();
+    }
+  });
+  const editor = {
+    area,
+    saveRange() {
+      const sel = window.getSelection();
+      if (sel.rangeCount && area.contains(sel.getRangeAt(0).commonAncestorContainer)) lastRange = sel.getRangeAt(0).cloneRange();
+    },
+  };
+  area.addEventListener('focus', () => (activeRichEditor = editor));
+
+  const toolbar = h(
+    'div',
+    { class: 'rich-toolbar', role: 'toolbar', 'aria-label': '文字の色' },
+    MARK_BUTTONS.map((b) =>
+      h(
+        'button',
+        {
+          class: `rich-btn rich-btn-${b.type}`,
+          type: 'button',
+          title: b.title,
+          'aria-label': b.title,
+          // 押しても入力欄の選択が外れないようにする
+          onpointerdown: (e) => e.preventDefault(),
+          onmousedown: (e) => e.preventDefault(),
+          onclick: () => applyMark(b.type),
+        },
+        b.label,
+      ),
+    ),
+  );
+  const wrap = h('div', { class: 'rich' }, toolbar, area);
+  let hideTimer;
+  wrap.addEventListener('focusin', () => {
+    clearTimeout(hideTimer);
+    wrap.classList.add('is-active');
+  });
+  wrap.addEventListener('focusout', () => {
+    hideTimer = setTimeout(() => {
+      if (!wrap.contains(document.activeElement)) wrap.classList.remove('is-active');
+    }, 150);
+  });
+
+  paint(String(text ?? ''), normalizeMarks(marks, String(text ?? '').length));
+  return { el: wrap, area, value: () => readRich(area) };
 }
 
 /* ---------- ログイン ---------- */
@@ -308,28 +744,30 @@ function renderDetail(id) {
 
   const fmt = (iso) => new Date(iso).toLocaleString('ja-JP', { dateStyle: 'medium', timeStyle: 'short' });
   const list = sessionsOf(store.getAllSessions(), c.id);
+  const editHash = `${companyHash(c.id)}/edit`;
+  const edit = (target) => () => editAt(editHash, target);
 
   view.replaceChildren(
     h(
       'div',
       { class: 'detail' },
-      h('h2', {}, c.name),
-      h('div', {}, h('div', { class: 'detail-label' }, '利用サイト'), c.sites.length ? chips(c.sites) : h('span', { class: 'muted' }, '未登録')),
+      h('div', { class: 'detail-title-row' }, h('h2', {}, c.name), editBtn('会社名', edit('name'))),
+      h('div', {}, labelRow('利用サイト', edit('sites')), c.sites.length ? chips(c.sites) : h('span', { class: 'muted' }, '未登録')),
       h(
         'div',
         {},
-        h('div', { class: 'detail-label' }, '求人URL'),
+        labelRow('求人URL', edit('url')),
         c.url
           ? h('a', { class: 'detail-url', href: c.url, target: '_blank', rel: 'noopener noreferrer' }, c.url)
           : h('span', { class: 'muted' }, '未登録'),
       ),
-      h('div', {}, h('div', { class: 'detail-label' }, 'メモ'), c.memo ? h('div', { class: 'pre' }, c.memo) : h('span', { class: 'muted' }, '未登録')),
+      h('div', {}, labelRow('メモ', edit('memo')), c.memo ? richView(c.memo, c.memoMarks) : h('span', { class: 'muted' }, '未登録')),
       fieldsOf(c).map((f) =>
         h(
           'div',
           { class: 'custom-field' },
-          h('div', { class: 'custom-field-title' }, f.title),
-          f.body ? h('div', { class: 'pre' }, f.body) : h('span', { class: 'muted' }, '未記入'),
+          labelRow(f.title, edit(`field:${f.id}`)),
+          f.body ? richView(f.body, f.bodyMarks) : h('span', { class: 'muted' }, '未記入'),
         ),
       ),
       h('div', { class: 'detail-meta' }, `登録 ${fmt(c.createdAt)}・更新 ${fmt(c.updatedAt)}`),
@@ -375,10 +813,11 @@ function renderDetail(id) {
 async function onDelete(c) {
   const n = store.sessionsFor(c.id).length;
   const extra = n ? `面接・セミナー記録${n}件も一緒に削除されます。` : '';
-  if (!(await confirmDialog(`「${c.name}」を削除しますか？${extra}元に戻せません。`, '削除する', { danger: true }))) return;
-  store.remove(c.id);
-  toast('削除しました');
+  const msg = `「${c.name}」を削除しますか？${extra}削除したものは${TRASH_DAYS}日間ゴミ箱に残り、設定から戻せます。`;
+  if (!(await confirmDialog(msg, '削除する', { danger: true }))) return;
+  const trashId = store.remove(c.id);
   go('#/');
+  toastUndoTrash(`「${c.name}」を削除しました`, trashId, (where) => go(companyHash(where.companyId)));
 }
 
 /* ---------- 会社の登録／編集 ---------- */
@@ -404,8 +843,7 @@ function renderForm(id) {
     placeholder: 'https://',
     value: existing?.url ?? '',
   });
-  const memoInput = h('textarea', { id: 'f-memo', placeholder: '志望動機、気になる点など' });
-  memoInput.value = existing?.memo ?? '';
+  const memo = richEditor({ id: 'f-memo', text: existing?.memo ?? '', marks: existing?.memoMarks, placeholder: '志望動機、気になる点など', label: 'メモ' });
   const nameErr = h('div', { class: 'error', role: 'alert' });
   const urlErr = h('div', { class: 'error', role: 'alert' });
   const fields = fieldsEditor(fieldsOf(existing), usedFieldTitles(store.getAll()));
@@ -456,12 +894,13 @@ function renderForm(id) {
       name: nameInput.value,
       sites: siteChoices.filter((s) => selected.has(s)),
       url: urlInput.value,
-      memo: memoInput.value,
+      ...(({ text, marks }) => ({ memo: text, memoMarks: marks }))(memo.value()),
       fields: fields.value(),
     };
     try {
       const saved = existing ? store.update(existing.id, input) : store.add(input);
-      toast(existing ? '保存しました' : '登録しました');
+      const trashed = existing ? removedFields(fieldsOf(existing), saved.fields).length : 0;
+      toast(existing ? (trashed ? `保存しました（消した項目${trashed}件はゴミ箱に移しました）` : '保存しました') : '登録しました', trashed ? 4000 : 2500);
       history.replaceState(null, '', companyHash(saved.id));
       render();
     } catch (err) {
@@ -481,13 +920,14 @@ function renderForm(id) {
     h(
       'form',
       { class: 'form', novalidate: true, onsubmit: onSubmit },
-      field('会社名', [nameInput, nameErr], { required: true, forId: 'f-name' }),
-      field('利用サイト（複数選べます）', [
-        optionsEl,
-        h('div', { class: 'site-add' }, customInput, h('button', { class: 'btn btn-small', type: 'button', onclick: addCustom }, '追加')),
-      ]),
-      field('求人URL', [urlInput, urlErr], { forId: 'f-url' }),
-      field('メモ', memoInput, { forId: 'f-memo' }),
+      field('会社名', [nameInput, nameErr], { required: true, forId: 'f-name', focus: 'name', focusSel: '#f-name' }),
+      field(
+        '利用サイト（複数選べます）',
+        [optionsEl, h('div', { class: 'site-add' }, customInput, h('button', { class: 'btn btn-small', type: 'button', onclick: addCustom }, '追加'))],
+        { focus: 'sites', focusSel: '.site-option' },
+      ),
+      field('求人URL', [urlInput, urlErr], { forId: 'f-url', focus: 'url', focusSel: '#f-url' }),
+      h('div', { class: 'field', 'data-focus': 'memo' }, h('span', { class: 'label' }, 'メモ'), memo.el),
       h('div', { class: 'field' }, h('span', { class: 'label' }, '自分で作る項目'), fields.el),
       h(
         'div',
@@ -538,8 +978,8 @@ function fieldsEditor(initial, usedTitles) {
       value: f.title ?? '',
       oninput: () => drawSuggestions(),
     });
-    const body = h('textarea', { class: 'field-body-input', rows: '4', placeholder: '内容', 'aria-label': '内容' });
-    body.value = f.body ?? '';
+    const body = richEditor({ text: f.body ?? '', marks: f.bodyMarks, placeholder: '内容', label: '内容' });
+    body.area.classList.add('field-body-input');
     const error = h('div', { class: 'error', role: 'alert' });
     const up = h('button', { class: 'icon-mini', type: 'button', 'aria-label': '上へ', title: '上へ', onclick: () => move(entry, -1) }, '↑');
     const down = h('button', { class: 'icon-mini', type: 'button', 'aria-label': '下へ', title: '下へ', onclick: () => move(entry, 1) }, '↓');
@@ -549,25 +989,38 @@ function fieldsEditor(initial, usedTitles) {
         class: 'link-btn danger',
         type: 'button',
         onclick: () => {
-          rows.splice(rows.indexOf(entry), 1);
+          const at = rows.indexOf(entry);
+          rows.splice(at, 1);
           redraw();
+          const name = title.value.trim() || '名前なし';
+          toast(`項目「${name}」を消しました`, UNDO_MS, {
+            label: '元に戻す',
+            scope: 'view',
+            onClick: () => {
+              if (rows.includes(entry)) return;
+              rows.splice(Math.min(at, rows.length), 0, entry);
+              redraw();
+              row.scrollIntoView({ block: 'center' });
+            },
+          });
         },
       },
       'この項目を消す',
     );
+    const id = f.id || newId();
     const row = h(
       'div',
-      { class: 'qa-row custom-field-row' },
+      { class: 'qa-row custom-field-row', 'data-focus': `field:${id}` },
       h('div', { class: 'qa-row-head' }, h('div', { class: 'row-move' }, up, down), del),
       title,
       error,
-      body,
+      body.el,
     );
-    const entry = { id: f.id || newId(), row, title, body, error, up, down };
+    const entry = { id, row, title, body, error, up, down };
     rows.push(entry);
     redraw();
     if (focus === 'title') title.focus();
-    if (focus === 'body') body.focus();
+    if (focus === 'body') body.area.focus();
   };
   function drawSuggestions() {
     const have = new Set(rows.map((r) => r.title.value.trim()));
@@ -589,7 +1042,11 @@ function fieldsEditor(initial, usedTitles) {
   );
   return {
     el,
-    value: () => rows.map((r) => ({ id: r.id, title: r.title.value, body: r.body.value })),
+    value: () =>
+      rows.map((r) => {
+        const { text, marks } = r.body.value();
+        return { id: r.id, title: r.title.value, body: text, bodyMarks: marks };
+      }),
     errorTargets: () => Object.fromEntries(rows.map((r) => [`field:${r.id}`, { input: r.title, error: r.error }])),
   };
 }
@@ -605,7 +1062,7 @@ function qaList(pairs, aLabel) {
         'li',
         {},
         h('div', { class: 'qa-q' }, p.q || '（質問なし）'),
-        p.a ? h('div', { class: 'qa-a' }, h('span', { class: 'qa-a-label' }, aLabel), h('div', { class: 'pre' }, p.a)) : null,
+        p.a ? h('div', { class: 'qa-a' }, h('span', { class: 'qa-a-label' }, aLabel), richView(p.a, p.aMarks)) : null,
       ),
     ),
   );
@@ -616,17 +1073,19 @@ function renderSessionDetail(cid, sid) {
   const s = store.getSession(sid);
   if (!c || !s || s.companyId !== cid) return renderNotFound('この記録は見つかりませんでした');
   setHeader(sessionLabel(s), { back: true });
+  const editHash = `${sessionHash(cid, sid)}/edit`;
+  const edit = (target) => () => editAt(editHash, target);
 
   view.replaceChildren(
     h(
       'div',
       { class: 'detail' },
       h('div', { class: 'card-meta' }, [formatDate(s.date) || '日付なし', h('span', { class: 'chip chip-sub' }, s.type)]),
-      h('h2', {}, sessionLabel(s)),
+      h('div', { class: 'detail-title-row' }, h('h2', {}, sessionLabel(s)), editBtn('名前と日付', edit('title'))),
       h('div', { class: 'muted' }, c.name),
-      h('div', {}, h('div', { class: 'detail-label' }, `聞かれたこと（${s.asked.length}件）`), qaList(s.asked, '自分の答え')),
-      h('div', {}, h('div', { class: 'detail-label' }, `自分がした質問（${s.myQuestions.length}件）`), qaList(s.myQuestions, '返ってきた答え')),
-      h('div', {}, h('div', { class: 'detail-label' }, '感想・反省メモ'), s.memo ? h('div', { class: 'pre' }, s.memo) : h('span', { class: 'muted' }, 'なし')),
+      h('div', {}, labelRow(`聞かれたこと（${s.asked.length}件）`, edit('asked')), qaList(s.asked, '自分の答え')),
+      h('div', {}, labelRow(`自分がした質問（${s.myQuestions.length}件）`, edit('mine')), qaList(s.myQuestions, '返ってきた答え')),
+      h('div', {}, labelRow('感想・反省メモ', edit('memo')), s.memo ? richView(s.memo, s.memoMarks) : h('span', { class: 'muted' }, 'なし')),
     ),
     h(
       'div',
@@ -638,10 +1097,11 @@ function renderSessionDetail(cid, sid) {
 }
 
 async function onDeleteSession(s) {
-  if (!(await confirmDialog(`「${sessionLabel(s)}」の記録を削除しますか？元に戻せません。`, '削除する', { danger: true }))) return;
-  store.removeSession(s.id);
-  toast('削除しました');
+  const msg = `「${sessionLabel(s)}」の記録を削除しますか？削除した記録は${TRASH_DAYS}日間ゴミ箱に残り、設定から戻せます。`;
+  if (!(await confirmDialog(msg, '削除する', { danger: true }))) return;
+  const trashId = store.removeSession(s.id);
   go(companyHash(s.companyId));
+  toastUndoTrash(`記録「${sessionLabel(s)}」を削除しました`, trashId, (where) => go(sessionHash(where.companyId, where.sessionId)));
 }
 
 /* ---------- 面接・セミナー記録の登録／編集 ---------- */
@@ -655,9 +1115,9 @@ function qaEditor(initial, { qLabel, aLabel, addLabel, name }) {
     });
   const addRow = (pair = { q: '', a: '' }, focus = false) => {
     const q = h('textarea', { class: 'qa-input-q', rows: '2', placeholder: qLabel, 'aria-label': qLabel });
-    const a = h('textarea', { class: 'qa-input-a', rows: '3', placeholder: aLabel, 'aria-label': aLabel });
+    const a = richEditor({ text: pair.a ?? '', marks: pair.aMarks, placeholder: aLabel, label: aLabel });
+    a.area.classList.add('qa-input-a');
     q.value = pair.q;
-    a.value = pair.a;
     const num = h('span', { class: 'qa-num' });
     const row = h(
       'div',
@@ -672,16 +1132,29 @@ function qaEditor(initial, { qLabel, aLabel, addLabel, name }) {
             class: 'link-btn danger',
             type: 'button',
             onclick: () => {
-              rows.splice(rows.indexOf(entry), 1);
+              const at = rows.indexOf(entry);
+              rows.splice(at, 1);
               row.remove();
               renumber();
+              toast(`${qLabel}の${at + 1}件目を消しました`, UNDO_MS, {
+                label: '元に戻す',
+                scope: 'view',
+                onClick: () => {
+                  if (rows.includes(entry)) return;
+                  const i = Math.min(at, rows.length);
+                  rowsEl.insertBefore(row, rows[i]?.row ?? null);
+                  rows.splice(i, 0, entry);
+                  renumber();
+                  row.scrollIntoView({ block: 'center' });
+                },
+              });
             },
           },
           'この質問を消す',
         ),
       ),
       q,
-      a,
+      a.el,
     );
     const entry = { row, q, a, num };
     rows.push(entry);
@@ -691,7 +1164,14 @@ function qaEditor(initial, { qLabel, aLabel, addLabel, name }) {
   };
   (initial.length ? initial : [{ q: '', a: '' }]).forEach((p) => addRow(p));
   const el = h('div', {}, rowsEl, h('button', { class: 'btn btn-small btn-add', type: 'button', onclick: () => addRow(undefined, true) }, addLabel));
-  return { el, value: () => rows.map((r) => ({ q: r.q.value, a: r.a.value })) };
+  return {
+    el,
+    value: () =>
+      rows.map((r) => {
+        const { text, marks } = r.a.value();
+        return { q: r.q.value, a: text, aMarks: marks };
+      }),
+  };
 }
 
 function renderSessionForm(cid, sid) {
@@ -753,8 +1233,13 @@ function renderSessionForm(cid, sid) {
     addLabel: '＋ 自分の質問を追加',
     name: 'mine',
   });
-  const memoInput = h('textarea', { id: 's-memo', placeholder: '雰囲気、うまく答えられなかったこと、次に活かしたいことなど' });
-  memoInput.value = existing?.memo ?? '';
+  const memo = richEditor({
+    id: 's-memo',
+    text: existing?.memo ?? '',
+    marks: existing?.memoMarks,
+    placeholder: '雰囲気、うまく答えられなかったこと、次に活かしたいことなど',
+    label: '感想・反省メモ',
+  });
 
   const onSubmit = (e) => {
     e.preventDefault();
@@ -764,7 +1249,7 @@ function renderSessionForm(cid, sid) {
       title: titleInput.value,
       asked: asked.value(),
       myQuestions: mine.value(),
-      memo: memoInput.value,
+      ...(({ text, marks }) => ({ memo: text, memoMarks: marks }))(memo.value()),
     };
     try {
       const saved = existing ? store.updateSessionById(existing.id, input) : store.addSession(cid, input);
@@ -791,10 +1276,10 @@ function renderSessionForm(cid, sid) {
       { class: 'form', novalidate: true, onsubmit: onSubmit },
       field('種類', [typeGroup, typeErr]),
       field('日付', [dateInput, dateErr], { forId: 's-date' }),
-      field('名前', [titleInput, titleErr], { forId: 's-title' }),
-      field('聞かれたこと と 自分の答え', asked.el),
-      field('自分がした質問 と 返ってきた答え', mine.el),
-      field('感想・反省メモ', memoInput, { forId: 's-memo' }),
+      field('名前', [titleInput, titleErr], { forId: 's-title', focus: 'title', focusSel: '#s-title' }),
+      field('聞かれたこと と 自分の答え', asked.el, { focus: 'asked', focusSel: '.qa-input-q' }),
+      field('自分がした質問 と 返ってきた答え', mine.el, { focus: 'mine', focusSel: '.qa-input-q' }),
+      field('感想・反省メモ', memo.el, { focus: 'memo' }),
       h(
         'div',
         { class: 'actions' },
@@ -827,7 +1312,12 @@ function renderSettings() {
   });
   const statusEl = h('p', { class: 'sync-status' });
   const countEl = h('p', {});
+  const trashEl = h('p', {});
   const update = () => {
+    const n = store.getTrash().length;
+    trashEl.textContent = n
+      ? `消した会社・記録・項目が${n}件入っています。${TRASH_DAYS}日たつと自動で消えます。`
+      : `消した会社・記録・項目は${TRASH_DAYS}日間ここに残り、元に戻せます。今は空です。`;
     const st = store.syncStatus();
     statusEl.textContent = STATUS_TEXT[st];
     statusEl.dataset.status = st;
@@ -847,6 +1337,7 @@ function renderSettings() {
       h('p', {}, '同じアカウントでログインすれば、スマホとパソコンで同じデータを見られます。'),
       h('button', { class: 'btn', type: 'button', onclick: onSignOut }, 'ログアウト'),
     ),
+    h('section', { class: 'section' }, h('h2', {}, 'ゴミ箱'), trashEl, h('button', { class: 'btn', type: 'button', onclick: () => go('#/trash') }, 'ゴミ箱を開く')),
     h('section', { class: 'section' }, h('h2', {}, 'バックアップを書き出す'), countEl, h('button', { class: 'btn btn-primary', type: 'button', onclick: onExport }, '書き出す')),
     h(
       'section',
@@ -948,6 +1439,60 @@ async function saveToCloud(data, doneMessage) {
   }
 }
 
+/* ---------- ゴミ箱 ---------- */
+function renderTrash() {
+  setHeader('ゴミ箱', { back: true, settings: false });
+  const entries = store.getTrash();
+  const fmt = (iso) => new Date(iso).toLocaleString('ja-JP', { dateStyle: 'medium', timeStyle: 'short' });
+
+  const onRestore = (e) => {
+    try {
+      const where = store.restoreTrash(e.id);
+      const hash = where.sessionId ? sessionHash(where.companyId, where.sessionId) : companyHash(where.companyId);
+      toast('元に戻しました', 4000, { label: '開く', scope: 'global', onClick: () => go(hash) });
+    } catch (err) {
+      toast(err.message, 5000);
+    }
+  };
+  const onDeleteForever = async (e) => {
+    if (!(await confirmDialog(`${trashLabel(e)}を完全に削除しますか？もう元に戻せません。`, '完全に削除', { danger: true }))) return;
+    store.deleteTrash(e.id);
+    toast('完全に削除しました');
+  };
+  const onEmpty = async () => {
+    if (!(await confirmDialog(`ゴミ箱の${entries.length}件をすべて完全に削除しますか？もう元に戻せません。`, 'すべて削除', { danger: true }))) return;
+    store.deleteTrash(entries.map((e) => e.id));
+    toast('ゴミ箱を空にしました');
+  };
+
+  if (!entries.length) {
+    view.replaceChildren(h('div', { class: 'empty' }, h('strong', {}, 'ゴミ箱は空です'), `消した会社・記録・項目は${TRASH_DAYS}日間ここに残ります`));
+    return;
+  }
+  view.replaceChildren(
+    h('p', { class: 'count' }, `${entries.length}件・${TRASH_DAYS}日たつと自動で消えます`),
+    h(
+      'ul',
+      { class: 'list trash-list' },
+      entries.map((e) =>
+        h(
+          'li',
+          { class: 'trash-item' },
+          h('div', { class: 'trash-label' }, trashLabel(e)),
+          h('div', { class: 'card-memo' }, `${fmt(e.deletedAt)}に削除・あと${trashDaysLeft(e)}日で自動で消えます`),
+          h(
+            'div',
+            { class: 'actions' },
+            h('button', { class: 'btn btn-danger', type: 'button', onclick: () => onDeleteForever(e) }, '完全に削除'),
+            h('button', { class: 'btn btn-primary', type: 'button', onclick: () => onRestore(e) }, '戻す'),
+          ),
+        ),
+      ),
+    ),
+    h('button', { class: 'btn btn-danger trash-empty', type: 'button', onclick: onEmpty }, 'ゴミ箱を空にする'),
+  );
+}
+
 /* ---------- 以前の版（端末内保存）からの移行 ---------- */
 // 以前の版は移行に成功したか確かめずに「移行済み」にしていたので、キーを変えてもう一度確認する。
 const legacyKey = (uid) => `legacy-migrated-v2:${uid}`;
@@ -1019,6 +1564,7 @@ function renderNotFound(message) {
 /* ---------- ルーティング ---------- */
 function parentHash() {
   const path = location.hash.replace(/^#/, '') || '/';
+  if (path === '/trash') return '#/settings';
   let m;
   if ((m = path.match(/^\/c\/([^/]+)\/s\/([^/]+)\/edit$/))) return `#/c/${m[1]}/s/${m[2]}`;
   if ((m = path.match(/^\/c\/([^/]+)\/(edit|s\/.+)$/))) return `#/c/${m[1]}`;
@@ -1030,12 +1576,17 @@ function render({ keepScroll = false } = {}) {
   const y = window.scrollY;
   refreshView = null;
   refreshStatus = null;
+  if (toastScope === 'view') hideToast();
   const path = location.hash.replace(/^#/, '') || '/';
   const dec = decodeURIComponent;
   let m;
   try {
     if (path === '/new') renderForm(null);
     else if (path === '/settings') renderSettings();
+    else if (path === '/trash') {
+      renderTrash();
+      refreshView = () => render({ keepScroll: true });
+    }
     else if ((m = path.match(/^\/c\/([^/]+)\/s\/new$/))) renderSessionForm(dec(m[1]), null);
     else if ((m = path.match(/^\/c\/([^/]+)\/s\/([^/]+)\/edit$/))) renderSessionForm(dec(m[1]), dec(m[2]));
     else if ((m = path.match(/^\/c\/([^/]+)\/s\/([^/]+)$/))) {
@@ -1051,6 +1602,7 @@ function render({ keepScroll = false } = {}) {
     view.replaceChildren(h('div', { class: 'empty' }, h('strong', {}, '表示できませんでした'), err.message));
   }
   window.scrollTo(0, keepScroll ? y : 0);
+  applyPendingFocus();
 }
 
 backBtn.addEventListener('click', () => go(parentHash()));
@@ -1106,6 +1658,11 @@ function start() {
     signedIn = true;
     render();
     maybeMigrateLegacy(user);
+    // 30日たったゴミ箱の中身は、クラウドの最新の状態が届いてから消す
+    store
+      .waitForServer()
+      .then(() => store.purgeExpiredTrash())
+      .catch(() => {});
   });
 }
 

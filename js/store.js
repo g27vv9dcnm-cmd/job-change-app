@@ -2,6 +2,7 @@
 //
 // データの置き場所: users/{ログインした人のID}/companies/{会社ID}
 //                   users/{ログインした人のID}/sessions/{記録ID}（companyId で会社とひもづけ）
+//                   users/{ログインした人のID}/trash/{ゴミ箱のID}（消したものを30日間とっておく）
 //
 // Firestore の端末内キャッシュを使うので、圏外でも読み書きでき、つながると自動で同期される。
 // 書き込みはサーバーの返事を待たずに画面へ反映し、失敗したときだけ onError で知らせる。
@@ -20,6 +21,12 @@ import {
   toBackup,
   parseBackup,
   countImport,
+  createTrashEntry,
+  removedFields,
+  insertField,
+  fieldsOf,
+  sortTrash,
+  trashDaysLeft,
 } from './model.js';
 
 export class ValidationError extends Error {
@@ -35,7 +42,8 @@ let uid = null;
 let unsubs = [];
 let companies = new Map();
 let sessions = new Map();
-const status = { companiesPending: false, sessionsPending: false, fromCache: true };
+let trash = new Map();
+const status = { companiesPending: false, sessionsPending: false, trashPending: false, fromCache: true };
 let readError = null; // 読み込みが断られたときのエラー（購読はそこで止まる）
 
 const dataListeners = new Set();
@@ -147,12 +155,13 @@ export function saveErrorMessage(err, kind = 'write') {
 const userCol = (name) => fb.collection(db, 'users', uid, name);
 const userDoc = (name, id) => fb.doc(db, 'users', uid, name, id);
 
-/** ログインした人のデータの購読を始める。両方の最初のデータが届いたら resolve */
+/** ログインした人のデータの購読を始める。すべての最初のデータが届いたら resolve */
 export function startSync(user) {
   stopSync();
   uid = user.uid;
   return new Promise((resolve) => {
-    const firstLoaded = { companies: false, sessions: false };
+    const firstLoaded = { companies: false, sessions: false, trash: false };
+    const allLoaded = () => Object.values(firstLoaded).every(Boolean);
     const listen = (name, setMap, pendingKey) =>
       fb.onSnapshot(
         userCol(name),
@@ -164,7 +173,7 @@ export function startSync(user) {
           status.fromCache = snap.metadata.fromCache;
           if (!firstLoaded[name]) {
             firstLoaded[name] = true;
-            if (firstLoaded.companies && firstLoaded.sessions) resolve();
+            if (allLoaded()) resolve();
           }
           if (changed) emitData();
           emitStatus();
@@ -175,13 +184,14 @@ export function startSync(user) {
           emitStatus();
           if (!firstLoaded[name]) {
             firstLoaded[name] = true;
-            if (firstLoaded.companies && firstLoaded.sessions) resolve();
+            if (allLoaded()) resolve();
           }
         },
       );
     unsubs = [
       listen('companies', (m) => (companies = m), 'companiesPending'),
       listen('sessions', (m) => (sessions = m), 'sessionsPending'),
+      listen('trash', (m) => (trash = m), 'trashPending'),
     ];
   });
 }
@@ -192,7 +202,8 @@ export function stopSync() {
   uid = null;
   companies = new Map();
   sessions = new Map();
-  Object.assign(status, { companiesPending: false, sessionsPending: false, fromCache: true });
+  trash = new Map();
+  Object.assign(status, { companiesPending: false, sessionsPending: false, trashPending: false, fromCache: true });
   readError = null;
   emitStatus();
 }
@@ -214,7 +225,7 @@ export function waitForServer() {
 
 /** 同期の状態: 'pending'（未送信の変更あり）| 'offline'（サーバー未確認）| 'synced' */
 export function syncStatus() {
-  if (status.companiesPending || status.sessionsPending) return 'pending';
+  if (status.companiesPending || status.sessionsPending || status.trashPending) return 'pending';
   if (status.fromCache) return 'offline';
   return 'synced';
 }
@@ -245,21 +256,33 @@ export function update(id, rawInput) {
   const existing = get(id);
   if (!existing) throw new Error('この会社は見つかりませんでした');
   const company = updateCompany(existing, input);
+  const batch = fb.writeBatch(db);
+  batch.set(userDoc('companies', company.id), company);
+  // 編集で消した項目はゴミ箱へ（あとから元の位置に戻せるように）
+  for (const { field, index } of removedFields(fieldsOf(existing), company.fields)) {
+    putTrash(batch, createTrashEntry('field', { companyId: company.id, companyName: company.name, field, index }));
+  }
   companies.set(company.id, company);
-  fire(fb.setDoc(userDoc('companies', company.id), company));
+  fire(batch.commit());
   return company;
 }
 
-/** 会社と、その会社の記録をまとめて削除する */
+/** 会社と、その会社の記録をまとめてゴミ箱に移す。戻すときに使うゴミ箱のIDを返す */
 export function remove(id) {
+  const company = get(id);
+  if (!company) throw new Error('この会社は見つかりませんでした');
+  const list = sessionsFor(id);
+  const entry = createTrashEntry('company', { company, sessions: list });
   const batch = fb.writeBatch(db);
+  putTrash(batch, entry);
   batch.delete(userDoc('companies', id));
-  for (const s of sessionsFor(id)) {
+  for (const s of list) {
     batch.delete(userDoc('sessions', s.id));
     sessions.delete(s.id);
   }
   companies.delete(id);
   fire(batch.commit());
+  return entry.id;
 }
 
 /* ---------- 面接・セミナー記録 ---------- */
@@ -291,9 +314,95 @@ export function updateSessionById(id, rawInput) {
   return s;
 }
 
+/** 記録をゴミ箱に移す。戻すときに使うゴミ箱のIDを返す */
 export function removeSession(id) {
+  const session = getSession(id);
+  if (!session) throw new Error('この記録は見つかりませんでした');
+  const entry = createTrashEntry('session', { session, companyName: get(session.companyId)?.name ?? '' });
+  const batch = fb.writeBatch(db);
+  putTrash(batch, entry);
+  batch.delete(userDoc('sessions', id));
   sessions.delete(id);
-  fire(fb.deleteDoc(userDoc('sessions', id)));
+  fire(batch.commit());
+  return entry.id;
+}
+
+/* ---------- ゴミ箱 ---------- */
+
+function putTrash(batch, entry) {
+  batch.set(userDoc('trash', entry.id), entry);
+  trash.set(entry.id, entry);
+}
+
+/** 新しく消したものが上に来る順 */
+export const getTrash = () => sortTrash([...trash.values()]);
+
+/** 戻す先の会社がないときの説明 */
+function missingCompanyMessage(companyId, companyName) {
+  const inTrash = [...trash.values()].some((e) => e.kind === 'company' && e.company?.id === companyId);
+  return inTrash
+    ? `先にゴミ箱から会社「${companyName}」を戻してください`
+    : `会社「${companyName}」が見つからないため戻せません`;
+}
+
+/**
+ * ゴミ箱から元の場所に戻す。戻した場所 { companyId, sessionId? } を返す。
+ * 戻せないとき（戻す先の会社がないなど）は理由つきで例外を投げ、ゴミ箱には残す。
+ */
+export function restoreTrash(trashId) {
+  const entry = trash.get(trashId);
+  if (!entry) throw new Error('ゴミ箱に見つかりませんでした');
+  const batch = fb.writeBatch(db);
+  let result;
+  if (entry.kind === 'company' && entry.company?.id) {
+    batch.set(userDoc('companies', entry.company.id), entry.company);
+    companies.set(entry.company.id, entry.company);
+    for (const s of Array.isArray(entry.sessions) ? entry.sessions : []) {
+      batch.set(userDoc('sessions', s.id), s);
+      sessions.set(s.id, s);
+    }
+    result = { companyId: entry.company.id };
+  } else if (entry.kind === 'session' && entry.session?.id) {
+    const cid = entry.session.companyId;
+    if (!get(cid)) throw new Error(missingCompanyMessage(cid, entry.companyName));
+    batch.set(userDoc('sessions', entry.session.id), entry.session);
+    sessions.set(entry.session.id, entry.session);
+    result = { companyId: cid, sessionId: entry.session.id };
+  } else if (entry.kind === 'field' && entry.field?.id) {
+    const c = get(entry.companyId);
+    if (!c) throw new Error(missingCompanyMessage(entry.companyId, entry.companyName));
+    const company = { ...c, fields: insertField(fieldsOf(c), entry.field, entry.index), updatedAt: new Date().toISOString() };
+    batch.set(userDoc('companies', company.id), company);
+    companies.set(company.id, company);
+    result = { companyId: company.id };
+  } else {
+    throw new Error('このデータは戻せません');
+  }
+  batch.delete(userDoc('trash', trashId));
+  trash.delete(trashId);
+  fire(batch.commit());
+  emitData();
+  return result;
+}
+
+/** ゴミ箱から完全に削除する（元に戻せない） */
+export function deleteTrash(ids) {
+  const list = (Array.isArray(ids) ? ids : [ids]).filter((id) => trash.has(id));
+  for (let i = 0; i < list.length; i += 400) {
+    const batch = fb.writeBatch(db);
+    for (const id of list.slice(i, i + 400)) {
+      batch.delete(userDoc('trash', id));
+      trash.delete(id);
+    }
+    fire(batch.commit());
+  }
+  if (list.length) emitData();
+  return list.length;
+}
+
+/** 30日たったものを完全に削除する（サーバーの最新の状態が届いてから呼ぶ） */
+export function purgeExpiredTrash(now = new Date()) {
+  return deleteTrash([...trash.values()].filter((e) => trashDaysLeft(e, now) <= 0).map((e) => e.id));
 }
 
 /* ---------- バックアップ・移行 ---------- */

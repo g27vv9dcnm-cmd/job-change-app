@@ -36,9 +36,14 @@ export function normalizeInput(input) {
     name: String(input.name ?? '').trim(),
     sites: cleanSites,
     url: String(input.url ?? '').trim(),
-    memo: String(input.memo ?? '').replace(/\s+$/, ''),
+    ...richPair('memo', cleanRich(input.memo, input.memoMarks)),
     fields: normalizeFields(input.fields),
   };
+}
+
+/** { text, marks } を { memo, memoMarks } のような形にする */
+function richPair(key, { text, marks }) {
+  return { [key]: text, [`${key}Marks`]: marks };
 }
 
 /** 自分で作る項目を整形する（項目名も内容も空の項目は捨てる。id が無ければ振る） */
@@ -48,11 +53,11 @@ export function normalizeFields(fields) {
   const out = [];
   for (const f of fields) {
     const title = String(f?.title ?? '').trim();
-    const body = String(f?.body ?? '').replace(/\s+$/, '').replace(/^\s*\n/, '');
-    if (!title && !body.trim()) continue;
+    const body = cleanRich(f?.body, f?.bodyMarks, { dropLeadingBlankLines: true });
+    if (!title && !body.text.trim()) continue;
     const id = typeof f?.id === 'string' && f.id && !seen.has(f.id) ? f.id : newId();
     seen.add(id);
-    out.push({ id, title, body });
+    out.push({ id, title, ...richPair('body', body) });
   }
   return out;
 }
@@ -138,7 +143,7 @@ function normalizePairs(pairs) {
   return pairs
     .map((p) => ({
       q: String(p?.q ?? '').trim(),
-      a: String(p?.a ?? '').replace(/\s+$/, '').replace(/^\s*\n/, ''),
+      ...richPair('a', cleanRich(p?.a, p?.aMarks, { dropLeadingBlankLines: true })),
     }))
     .filter((p) => p.q || p.a.trim());
 }
@@ -151,7 +156,7 @@ export function normalizeSessionInput(input) {
     title: String(input.title ?? '').trim(),
     asked: normalizePairs(input.asked),
     myQuestions: normalizePairs(input.myQuestions),
-    memo: String(input.memo ?? '').replace(/\s+$/, ''),
+    ...richPair('memo', cleanRich(input.memo, input.memoMarks)),
   };
 }
 
@@ -307,4 +312,161 @@ export function pickNewer(existing, incoming) {
     const cur = byId.get(x.id);
     return !cur || String(x.updatedAt ?? '') > String(cur.updatedAt ?? '');
   });
+}
+
+
+/* ---------- 文字の色付け（黄マーカー・赤文字・太字） ---------- */
+// 文章そのものは今まで通りの文字列のまま保存し、色を付けた範囲だけを別に持つ。
+// 範囲は [{ s: 開始位置, e: 終了位置（含まない）, t: 種類 }]。検索や古いデータはそのまま使える。
+
+export const MARK_TYPES = ['hl', 'red', 'bold'];
+
+/** 範囲を整える（壊れた値・範囲外を捨て、同じ種類の重なりや隣り合いを1つにまとめる） */
+export function normalizeMarks(marks, textLength) {
+  if (!Array.isArray(marks)) return [];
+  const out = [];
+  for (const t of MARK_TYPES) {
+    const ranges = marks
+      .filter((m) => m && m.t === t && Number.isInteger(m.s) && Number.isInteger(m.e))
+      .map((m) => [Math.max(0, m.s), Math.min(textLength, m.e)])
+      .filter(([a, b]) => b > a)
+      .sort((x, y) => x[0] - y[0]);
+    let cur = null;
+    for (const [a, b] of ranges) {
+      if (cur && a <= cur[1]) cur[1] = Math.max(cur[1], b);
+      else {
+        if (cur) out.push({ s: cur[0], e: cur[1], t });
+        cur = [a, b];
+      }
+    }
+    if (cur) out.push({ s: cur[0], e: cur[1], t });
+  }
+  return out.sort((x, y) => x.s - y.s || MARK_TYPES.indexOf(x.t) - MARK_TYPES.indexOf(y.t));
+}
+
+/** 文章の前後の空白を整え、それに合わせて色の範囲もずらす */
+export function cleanRich(rawText, rawMarks, { dropLeadingBlankLines = false } = {}) {
+  let text = String(rawText ?? '');
+  let shift = 0;
+  if (dropLeadingBlankLines) {
+    const m = /^\s*\n/.exec(text);
+    if (m) {
+      shift = m[0].length;
+      text = text.slice(shift);
+    }
+  }
+  text = text.replace(/\s+$/, '');
+  const moved = Array.isArray(rawMarks)
+    ? rawMarks.filter((m) => m && typeof m === 'object').map((m) => ({ s: m.s - shift, e: m.e - shift, t: m.t }))
+    : [];
+  return { text, marks: normalizeMarks(moved, text.length) };
+}
+
+function subtractMarks(marks, s, e, types) {
+  const out = [];
+  for (const m of marks) {
+    if (!types.includes(m.t) || m.e <= s || m.s >= e) {
+      out.push(m);
+      continue;
+    }
+    if (m.s < s) out.push({ s: m.s, e: s, t: m.t });
+    if (m.e > e) out.push({ s: e, e: m.e, t: m.t });
+  }
+  return out;
+}
+
+/** [s, e) がすべて種類 t の色になっているか */
+export function isMarked(marks, s, e, t) {
+  let pos = s;
+  for (const m of normalizeMarks(marks, Infinity)) {
+    if (m.t !== t) continue;
+    if (m.s <= pos && m.e > pos) pos = m.e;
+    if (pos >= e) return true;
+  }
+  return pos >= e;
+}
+
+/** 選んだ範囲の色を切り替える（全部その色なら外し、そうでなければ付ける） */
+export function toggleMark(marks, s, e, t, textLength) {
+  const ms = normalizeMarks(marks, textLength);
+  if (e <= s || !MARK_TYPES.includes(t)) return ms;
+  if (isMarked(ms, s, e, t)) return normalizeMarks(subtractMarks(ms, s, e, [t]), textLength);
+  return normalizeMarks([...ms, { s, e, t }], textLength);
+}
+
+/** 選んだ範囲の色をすべて外す */
+export function clearMarks(marks, s, e, textLength) {
+  return normalizeMarks(subtractMarks(normalizeMarks(marks, textLength), s, e, MARK_TYPES), textLength);
+}
+
+/** 表示用に、色の切れ目で文章を区切る → [{ text, types }] */
+export function markSegments(text, marks) {
+  const ms = normalizeMarks(marks, text.length);
+  const cuts = new Set([0, text.length]);
+  for (const m of ms) {
+    cuts.add(m.s);
+    cuts.add(m.e);
+  }
+  const pts = [...cuts].sort((a, b) => a - b);
+  const segs = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [a, b] = [pts[i], pts[i + 1]];
+    if (b <= a) continue;
+    segs.push({ text: text.slice(a, b), types: MARK_TYPES.filter((t) => ms.some((m) => m.t === t && m.s <= a && m.e >= b)) });
+  }
+  return segs;
+}
+
+/* ---------- ゴミ箱 ---------- */
+// 消した会社・記録・項目を30日間とっておく。users/{uid}/trash/{id} に1件ずつ保存する。
+
+export const TRASH_DAYS = 30;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** ゴミ箱に入れる1件を作る。kind: 'company' | 'session' | 'field' */
+export function createTrashEntry(kind, data, now = new Date()) {
+  return { id: newId(), kind, deletedAt: now.toISOString(), ...data };
+}
+
+/** 自動で消えるまでの残り日数（0 なら期限切れ） */
+export function trashDaysLeft(entry, now = new Date()) {
+  const t = Date.parse(entry?.deletedAt);
+  if (Number.isNaN(t)) return 0;
+  return Math.max(0, Math.ceil((t + TRASH_DAYS * DAY_MS - now.getTime()) / DAY_MS));
+}
+
+/** ゴミ箱での表示名 */
+export function trashLabel(entry) {
+  switch (entry?.kind) {
+    case 'company': {
+      const n = Array.isArray(entry.sessions) ? entry.sessions.length : 0;
+      return `会社「${entry.company?.name ?? ''}」${n ? `（面接・セミナー記録${n}件も含む）` : ''}`;
+    }
+    case 'session':
+      return `「${entry.companyName ?? ''}」の記録「${entry.session ? sessionLabel(entry.session) : ''}」`;
+    case 'field':
+      return `「${entry.companyName ?? ''}」の項目「${entry.field?.title ?? ''}」`;
+    default:
+      return '不明なデータ';
+  }
+}
+
+/** 新しいものが上に来るよう並べる */
+export function sortTrash(entries) {
+  return [...entries].sort((a, b) => (a.deletedAt < b.deletedAt ? 1 : a.deletedAt > b.deletedAt ? -1 : 0));
+}
+
+/** 編集で消えた項目（id がなくなったもの）を、元の位置つきで返す */
+export function removedFields(before, after) {
+  const keep = new Set((Array.isArray(after) ? after : []).map((f) => f.id));
+  return (Array.isArray(before) ? before : []).map((field, index) => ({ field, index })).filter(({ field }) => !keep.has(field.id));
+}
+
+/** 項目を元の位置（なければ最後）に戻した一覧を返す。同じ id がすでにあれば何もしない */
+export function insertField(fields, field, index) {
+  const list = Array.isArray(fields) ? [...fields] : [];
+  if (list.some((f) => f.id === field.id)) return list;
+  const at = Number.isInteger(index) ? Math.min(Math.max(0, index), list.length) : list.length;
+  list.splice(at, 0, field);
+  return list;
 }

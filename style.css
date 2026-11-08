@@ -10,6 +10,10 @@
   --chip-bg: #e9f0ff;
   --chip-text: #1f4fb8;
   --shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --mark-hl-bg: #fff176;
+  --mark-hl-text: #1b1d22;
+  --mark-red: #d32f2f;
+  --mark-red-on-hl: #c62828;
   color-scheme: light dark;
 }
 
@@ -25,6 +29,10 @@
     --chip-text: #b9cdff;
     --danger: #ff6b6b;
     --shadow: none;
+    --mark-hl-bg: #ffe066;
+    --mark-hl-text: #15171b;
+    --mark-red: #ff7a7a;
+    --mark-red-on-hl: #b71c1c;
   }
 }
 
@@ -220,18 +228,24 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
 dialog p { margin: 0 0 18px; }
 
 .toast {
+  display: flex;
+  align-items: center;
+  gap: 14px;
   position: fixed;
-  left: 50%;
+  left: 16px;
+  right: 16px;
   bottom: calc(100px + env(safe-area-inset-bottom));
-  transform: translateX(-50%);
-  max-width: calc(100vw - 32px);
+  width: fit-content;
+  max-width: 560px;
+  margin: 0 auto;
   padding: 10px 18px;
-  border-radius: 999px;
+  border-radius: 20px;
   background: #222;
   color: #fff;
   font-size: 14px;
   z-index: 20;
 }
+.toast-text { flex: 1 1 auto; min-width: 0; }
 .toast[hidden] { display: none; }
 .btn-danger-fill { background: var(--danger); border-color: var(--danger); }
 
@@ -309,7 +323,107 @@ button:disabled { opacity: 0.6; }
 .field-suggest { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
 .field-suggest:empty { display: none; }
 .custom-field-row .field-title-input { padding: 10px 12px; border-radius: 10px; background: var(--bg); }
-.custom-field-row .field-body-input { min-height: 180px; }
 
 /* 入力欄は中身に合わせて伸びる（app.js の autoGrow）ので、中のスクロールバーは出さない */
 .field textarea, .qa-row textarea { overflow-y: hidden; }
+
+/* お知らせの「元に戻す」ボタン */
+.toast.has-action { padding: 6px 8px 6px 18px; }
+.toast-action {
+  flex: none;
+  border: 0;
+  border-radius: 999px;
+  padding: 7px 14px;
+  background: #fff;
+  color: #1b1d22;
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+/* 見出しの横の ✎ */
+.detail-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+.detail-label-row .detail-label { margin-bottom: 0; word-break: break-word; }
+.detail-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.edit-mini {
+  flex: none;
+  width: 36px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--accent);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.edit-mini:active { background: var(--border); }
+
+/* 色付きの文章 */
+.m-hl { background: var(--mark-hl-bg); color: var(--mark-hl-text); border-radius: 3px; padding: 0 1px; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+.m-red { color: var(--mark-red); }
+.m-hl.m-red { color: var(--mark-red-on-hl); }
+.m-bold { font-weight: 700; }
+
+/* 色を付けられる入力欄 */
+.rich { position: relative; }
+.rich-input {
+  position: relative;
+  width: 100%;
+  min-height: 140px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  font-size: 16px; /* iOSのズーム防止 */
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  outline: none;
+  cursor: text;
+}
+.rich-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
+.rich-input.is-empty::before {
+  content: attr(data-placeholder);
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  top: 12px;
+  color: var(--muted);
+  pointer-events: none;
+}
+.qa-row .rich-input { padding: 10px 12px; border-radius: 10px; background: var(--bg); min-height: 84px; }
+.qa-row .rich-input.is-empty::before { left: 12px; top: 10px; }
+.custom-field-row .rich-input.field-body-input { min-height: 180px; }
+
+.rich-toolbar {
+  display: none;
+  position: sticky;
+  top: calc(61px + env(safe-area-inset-top));
+  z-index: 5;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px 0;
+  background: var(--bg);
+}
+.qa-row .rich-toolbar, .custom-field-row .rich-toolbar { background: var(--surface); }
+.rich.is-active .rich-toolbar { display: flex; }
+.rich-btn {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 14px;
+  cursor: pointer;
+}
+.rich-btn-hl { background: var(--mark-hl-bg); color: var(--mark-hl-text); border-color: transparent; }
+.rich-btn-red { color: var(--mark-red); font-weight: 700; }
+.rich-btn-bold { font-weight: 800; }
+.rich-btn-clear { color: var(--muted); }
+
+/* ゴミ箱 */
+.trash-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px; }
+.trash-item { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px; display: flex; flex-direction: column; gap: 6px; }
+.trash-label { font-weight: 700; word-break: break-word; }
+.trash-item .actions { margin-top: 6px; }
+.trash-empty { width: 100%; margin-top: 16px; }

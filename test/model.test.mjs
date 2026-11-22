@@ -25,6 +25,10 @@ import {
   pickNewer,
   fieldsOf,
   prepOf,
+  validatePrep,
+  makeCommonNote,
+  copyPrepItem,
+  COMMON_NOTE_ID,
   usedFieldTitles,
   normalizeMarks,
   cleanRich,
@@ -122,13 +126,13 @@ test('backup round trip with sessions', () => {
   const list = [mk({ id: 'a', name: 'X', sites: ['doda'], url: 'https://x.jp', memo: 'm', fields: [{ id: 'f', title: '逆質問', body: 'b', bodyMarks: [{ s: 0, e: 1, t: 'hl' }] }], prep: [{ id: 'p', title: '志望動機', body: 'c', bodyMarks: [] }] })];
   const sessions = [mkSession({ id: 's1' })];
   const text = JSON.stringify(toBackup(list, sessions));
-  assert.deepEqual(parseBackup(text), { companies: list, sessions });
+  assert.deepEqual(parseBackup(text), { companies: list, sessions, notes: [] });
 });
 
 test('parseBackup reads old version-1 files (companies only)', () => {
   const list = [mk({ id: 'a' })];
   const v1 = JSON.stringify({ format: BACKUP_FORMAT, version: 1, exportedAt: 'x', companies: list });
-  assert.deepEqual(parseBackup(v1), { companies: list.map((c) => ({ ...c, fields: [], prep: [] })), sessions: [] });
+  assert.deepEqual(parseBackup(v1), { companies: list.map((c) => ({ ...c, fields: [], prep: [] })), sessions: [], notes: [] });
 });
 
 test('parseBackup rejects broken files', () => {
@@ -411,4 +415,34 @@ test('prep: normalized like fields, validated, searchable and kept in backups', 
     trashLabel({ kind: 'prep', companyName: 'A社', field: { title: '志望動機' } }),
     '「A社」の面接で話すこと「志望動機」',
   );
+});
+
+/* ---------- 共通の面接メモ ---------- */
+
+test('common prep: note shape, copy to a company and backup round trip', () => {
+  const t1 = new Date('2026-11-22T00:00:00.000Z');
+  const t2 = new Date('2026-11-23T00:00:00.000Z');
+  const prep = normalizeInput({ name: 'x', prep: [{ id: 'p1', title: '自己PR', body: '積算でExcelを自動化', bodyMarks: [{ s: 0, e: 2, t: 'red' }] }] }).prep;
+  const n1 = makeCommonNote(null, prep, t1);
+  assert.deepEqual(n1, { id: COMMON_NOTE_ID, prep, createdAt: t1.toISOString(), updatedAt: t1.toISOString() });
+  const n2 = makeCommonNote(n1, [], t2);
+  assert.equal(n2.createdAt, t1.toISOString(), '作った日時は変えない');
+  assert.equal(n2.updatedAt, t2.toISOString());
+
+  // コピーは id を持たず（会社側で新しく振られる）、色付けは別の配列になる
+  const copy = copyPrepItem(prep[0]);
+  assert.deepEqual(copy, { title: '自己PR', body: '積算でExcelを自動化', bodyMarks: [{ s: 0, e: 2, t: 'red' }] });
+  assert.notEqual(copy.bodyMarks, prep[0].bodyMarks);
+  assert.notEqual(copy.bodyMarks[0], prep[0].bodyMarks[0]);
+  const company = normalizeInput({ name: 'A社', prep: [copy] });
+  assert.ok(company.prep[0].id && company.prep[0].id !== 'p1');
+
+  assert.equal(validatePrep([{ id: 'z', title: '' }])['prep:z'], 'お題を入力してください');
+
+  const back = parseBackup(JSON.stringify(toBackup([], [], t1, [n1])));
+  assert.deepEqual(back.notes, [n1]);
+  // 共通メモが無いときはバックアップに notes を書かない（古い版でも読める）
+  assert.equal('notes' in toBackup([], []), false);
+  assert.throws(() => parseBackup(JSON.stringify({ ...toBackup([], []), notes: [{ id: 'other', prep: [] }] })), /共通の面接メモ/);
+  assert.equal(trashLabel({ kind: 'commonPrep', field: { title: '自己PR' } }), '共通の面接メモ「自己PR」');
 });

@@ -88,12 +88,34 @@ export function validate(input) {
     if (!f.title) errors[`field:${f.id}`] = '項目名を入力してください';
     else if (f.title.length > FIELD_TITLE_MAX) errors[`field:${f.id}`] = `項目名は${FIELD_TITLE_MAX}文字以内にしてください`;
   }
-  // 面接で話すことのエラーは `prep:{id}` に入れる
-  for (const p of input.prep ?? []) {
+  Object.assign(errors, validatePrep(input.prep));
+  return errors;
+}
+
+/** 面接で話すことの入力チェック。エラーは `prep:{id}` に入れる（画面の行と対応させるため） */
+export function validatePrep(prep) {
+  const errors = {};
+  for (const p of prep ?? []) {
     if (!p.title) errors[`prep:${p.id}`] = 'お題を入力してください';
     else if (p.title.length > PREP_TOPIC_MAX) errors[`prep:${p.id}`] = `お題は${PREP_TOPIC_MAX}文字以内にしてください`;
   }
   return errors;
+}
+
+/* ---------- 共通の面接メモ ---------- */
+// どの会社の面接でも使うメモ。users/{uid}/notes/common の1件に、会社ごとの prep と同じ形で保存する。
+
+export const COMMON_NOTE_ID = 'common';
+
+/** 共通メモを作る／更新する。prep は normalizeFields 済みで validatePrep を通っている前提 */
+export function makeCommonNote(existing, prep, now = new Date()) {
+  const t = now.toISOString();
+  return { id: COMMON_NOTE_ID, prep, createdAt: existing?.createdAt ?? t, updatedAt: t };
+}
+
+/** 共通メモのお題を、会社ごとのメモにコピーする形にする（id は新しく振る） */
+export function copyPrepItem(item) {
+  return { title: item?.title ?? '', body: item?.body ?? '', bodyMarks: Array.isArray(item?.bodyMarks) ? item.bodyMarks.map((m) => ({ ...m })) : [] };
 }
 
 export function isHttpUrl(value) {
@@ -239,13 +261,15 @@ export function todayString(now = new Date()) {
 
 /* ---------- バックアップ ---------- */
 
-export function toBackup(companies, sessions = [], now = new Date()) {
+export function toBackup(companies, sessions = [], now = new Date(), notes = []) {
   return {
     format: BACKUP_FORMAT,
     version: BACKUP_VERSION,
     exportedAt: now.toISOString(),
     companies,
     sessions,
+    // 共通の面接メモ（古いバックアップには無い）
+    ...(notes.length ? { notes } : {}),
   };
 }
 
@@ -267,7 +291,7 @@ function hasId(raw) {
 
 /**
  * バックアップ文字列を読み取る。壊れていれば例外を投げる（既存データには触らない）。
- * 古い形式（会社だけ）にも対応する。戻り値は { companies, sessions }。
+ * 古い形式（会社だけ）にも対応する。戻り値は { companies, sessions, notes }。
  */
 export function parseBackup(text) {
   let data;
@@ -299,7 +323,14 @@ export function parseBackup(text) {
     }
     return { id: raw.id, companyId: raw.companyId, ...input, ...timestamps(raw) };
   });
-  return { companies, sessions };
+  if (data.notes !== undefined && !Array.isArray(data.notes)) throw new Error('共通の面接メモのデータが壊れています');
+  const notes = (data.notes ?? []).map((raw) => {
+    if (raw?.id !== COMMON_NOTE_ID) throw new Error('共通の面接メモのデータが壊れています');
+    const prep = normalizeFields(raw.prep);
+    if (Object.keys(validatePrep(prep)).length) throw new Error('共通の面接メモのデータが壊れています');
+    return { id: COMMON_NOTE_ID, prep, ...timestamps(raw) };
+  });
+  return { companies, sessions, notes };
 }
 
 /** 読み込み結果の件数を数える（同じIDは上書き、それ以外は追加） */
@@ -435,7 +466,7 @@ export function markSegments(text, marks) {
 export const TRASH_DAYS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** ゴミ箱に入れる1件を作る。kind: 'company' | 'session' | 'field' | 'prep' */
+/** ゴミ箱に入れる1件を作る。kind: 'company' | 'session' | 'field' | 'prep' | 'commonPrep' */
 export function createTrashEntry(kind, data, now = new Date()) {
   return { id: newId(), kind, deletedAt: now.toISOString(), ...data };
 }
@@ -460,6 +491,8 @@ export function trashLabel(entry) {
       return `「${entry.companyName ?? ''}」の項目「${entry.field?.title ?? ''}」`;
     case 'prep':
       return `「${entry.companyName ?? ''}」の面接で話すこと「${entry.field?.title ?? ''}」`;
+    case 'commonPrep':
+      return `共通の面接メモ「${entry.field?.title ?? ''}」`;
     default:
       return '不明なデータ';
   }

@@ -26,6 +26,10 @@ import {
   insertField,
   fieldsOf,
   prepOf,
+  normalizeFields,
+  validatePrep,
+  makeCommonNote,
+  COMMON_NOTE_ID,
   sortTrash,
   trashDaysLeft,
 } from './model.js';
@@ -44,7 +48,8 @@ let unsubs = [];
 let companies = new Map();
 let sessions = new Map();
 let trash = new Map();
-const status = { companiesPending: false, sessionsPending: false, trashPending: false, fromCache: true };
+let notes = new Map(); // 共通の面接メモ（notes/common の1件）
+const status = { companiesPending: false, sessionsPending: false, trashPending: false, notesPending: false, fromCache: true };
 let readError = null; // 読み込みが断られたときのエラー（購読はそこで止まる）
 
 const dataListeners = new Set();
@@ -161,7 +166,7 @@ export function startSync(user) {
   stopSync();
   uid = user.uid;
   return new Promise((resolve) => {
-    const firstLoaded = { companies: false, sessions: false, trash: false };
+    const firstLoaded = { companies: false, sessions: false, trash: false, notes: false };
     const allLoaded = () => Object.values(firstLoaded).every(Boolean);
     const listen = (name, setMap, pendingKey) =>
       fb.onSnapshot(
@@ -193,6 +198,7 @@ export function startSync(user) {
       listen('companies', (m) => (companies = m), 'companiesPending'),
       listen('sessions', (m) => (sessions = m), 'sessionsPending'),
       listen('trash', (m) => (trash = m), 'trashPending'),
+      listen('notes', (m) => (notes = m), 'notesPending'),
     ];
   });
 }
@@ -204,7 +210,8 @@ export function stopSync() {
   companies = new Map();
   sessions = new Map();
   trash = new Map();
-  Object.assign(status, { companiesPending: false, sessionsPending: false, trashPending: false, fromCache: true });
+  notes = new Map();
+  Object.assign(status, { companiesPending: false, sessionsPending: false, trashPending: false, notesPending: false, fromCache: true });
   readError = null;
   emitStatus();
 }
@@ -226,7 +233,7 @@ export function waitForServer() {
 
 /** 同期の状態: 'pending'（未送信の変更あり）| 'offline'（サーバー未確認）| 'synced' */
 export function syncStatus() {
-  if (status.companiesPending || status.sessionsPending || status.trashPending) return 'pending';
+  if (status.companiesPending || status.sessionsPending || status.trashPending || status.notesPending) return 'pending';
   if (status.fromCache) return 'offline';
   return 'synced';
 }
@@ -331,6 +338,28 @@ export function removeSession(id) {
   return entry.id;
 }
 
+/* ---------- 共通の面接メモ ---------- */
+
+/** 共通の面接メモのお題一覧 */
+export const getCommonPrep = () => prepOf(notes.get(COMMON_NOTE_ID));
+
+/** 共通の面接メモを保存する。消したお題はゴミ箱へ */
+export function updateCommonPrep(rawPrep) {
+  const prep = normalizeFields(rawPrep);
+  const errors = validatePrep(prep);
+  if (Object.keys(errors).length) throw new ValidationError(errors);
+  const existing = notes.get(COMMON_NOTE_ID);
+  const note = makeCommonNote(existing, prep);
+  const batch = fb.writeBatch(db);
+  batch.set(userDoc('notes', COMMON_NOTE_ID), note);
+  for (const { field, index } of removedFields(prepOf(existing), prep)) {
+    putTrash(batch, createTrashEntry('commonPrep', { field, index }));
+  }
+  notes.set(COMMON_NOTE_ID, note);
+  fire(batch.commit());
+  return note;
+}
+
 /* ---------- ゴミ箱 ---------- */
 
 function putTrash(batch, entry) {
@@ -386,6 +415,12 @@ export function restoreTrash(trashId) {
     batch.set(userDoc('companies', company.id), company);
     companies.set(company.id, company);
     result = { companyId: company.id };
+  } else if (entry.kind === 'commonPrep' && entry.field?.id) {
+    const existing = notes.get(COMMON_NOTE_ID);
+    const note = makeCommonNote(existing, insertField(prepOf(existing), entry.field, entry.index));
+    batch.set(userDoc('notes', COMMON_NOTE_ID), note);
+    notes.set(COMMON_NOTE_ID, note);
+    result = { commonPrep: true };
   } else {
     throw new Error('このデータは戻せません');
   }
@@ -419,7 +454,7 @@ export function purgeExpiredTrash(now = new Date()) {
 /* ---------- バックアップ・移行 ---------- */
 
 export function exportBackup() {
-  return JSON.stringify(toBackup(getAll(), getAllSessions()), null, 2);
+  return JSON.stringify(toBackup(getAll(), getAllSessions(), new Date(), [...notes.values()]), null, 2);
 }
 
 /** 読み込む前に件数を数える（壊れたファイルなら例外） */
@@ -429,6 +464,7 @@ export function previewImport(text) {
     data,
     companies: countImport(getAll(), data.companies),
     sessions: countImport(getAllSessions(), data.sessions),
+    commonPrep: data.notes.reduce((n, x) => n + x.prep.length, 0),
   };
 }
 
@@ -437,17 +473,18 @@ export function previewImport(text) {
  * 画面にはすぐ反映し、戻り値の Promise はサーバーへの保存が確定したら resolve、断られたら reject する
  * （圏外のときはつながるまで待つ）。保存の成否で動きを変えたいときは await すること。
  */
-export function importData({ companies: cs, sessions: ss }) {
+export function importData({ companies: cs, sessions: ss, notes: ns = [] }) {
   const writes = [
     ...cs.map((c) => ['companies', c]),
     ...ss.map((s) => ['sessions', s]),
+    ...ns.map((n) => ['notes', n]),
   ];
   const commits = [];
   for (let i = 0; i < writes.length; i += 400) {
     const batch = fb.writeBatch(db);
     for (const [name, item] of writes.slice(i, i + 400)) {
       batch.set(userDoc(name, item.id), item);
-      (name === 'companies' ? companies : sessions).set(item.id, item);
+      ({ companies, sessions, notes })[name].set(item.id, item);
     }
     commits.push(batch.commit());
   }

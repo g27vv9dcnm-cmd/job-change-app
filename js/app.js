@@ -7,6 +7,7 @@ import {
   FIELD_TITLE_MAX,
   fieldsOf,
   prepOf,
+  copyPrepItem,
   PREP_TOPIC_MAX,
   usedFieldTitles,
   newId,
@@ -46,6 +47,10 @@ let signedIn = false;
 let refreshView = null;
 /** 同期の状態が変わったときに表示を更新する関数（設定画面のみ） */
 let refreshStatus = null;
+/** 画面を離れるときの後片付け（共通メモの表示を閉じるなど） */
+let leaveView = null;
+/** 会社の編集画面で共通メモを出しているか（端末ごとに覚える） */
+const COMMON_PANEL_KEY = 'common-prep-panel';
 
 /* ---------- 小さなDOMヘルパー（文字列は必ず textContent で入れる） ---------- */
 function h(tag, attrs = {}, ...children) {
@@ -591,6 +596,8 @@ function renderLogin() {
   setHeader('転職先メモ', { settings: false });
   refreshView = null;
   refreshStatus = null;
+  leaveView?.();
+  leaveView = null;
   const email = h('input', { id: 'l-email', type: 'email', autocomplete: 'username', inputmode: 'email', autocapitalize: 'off' });
   const password = h('input', { id: 'l-password', type: 'password', autocomplete: 'current-password' });
   const error = h('div', { class: 'error', role: 'alert' });
@@ -676,16 +683,23 @@ function renderList() {
     },
   });
   const toolbar = h('div', { class: 'toolbar' }, search, filtersEl);
+  const commonBtn = h(
+    'button',
+    { class: 'btn common-prep-btn', type: 'button', onclick: () => go('#/prep') },
+    `📝 共通の面接メモ（${store.getCommonPrep().length}件）`,
+  );
 
   function update() {
     const all = store.getAll();
     if (all.length === 0) {
       view.replaceChildren(
+        commonBtn,
         h('div', { class: 'empty' }, h('strong', {}, '行きたい会社を登録しましょう'), '右下の「＋」から登録できます'),
       );
       return;
     }
-    if (!view.contains(toolbar)) view.replaceChildren(toolbar, countEl, listEl);
+    commonBtn.textContent = `📝 共通の面接メモ（${store.getCommonPrep().length}件）`;
+    if (!view.contains(toolbar)) view.replaceChildren(commonBtn, toolbar, countEl, listEl);
 
     const sites = usedSites(all);
     if (listState.site && !sites.includes(listState.site)) listState.site = '';
@@ -776,20 +790,10 @@ function renderDetail(id) {
         'div',
         { class: 'prep' },
         labelRow(`面接で話すこと（${prepOf(c).length}件）`, edit('prep')),
-        prepOf(c).length
-          ? h(
-              'ol',
-              { class: 'qa-list' },
-              prepOf(c).map((p) =>
-                h(
-                  'li',
-                  { class: 'qa-item' },
-                  h('div', { class: 'qa-q prep-topic' }, p.title, editBtn(`お題「${p.title}」`, edit(`prep:${p.id}`))),
-                  p.body ? h('div', { class: 'qa-a' }, richView(p.body, p.bodyMarks)) : h('div', { class: 'muted small' }, '未記入'),
-                ),
-              ),
-            )
-          : h('span', { class: 'muted' }, '未登録（志望動機・自己PRなど、面接で言うことを準備できます）'),
+        prepList(prepOf(c), {
+          action: (p) => editBtn(`お題「${p.title}」`, edit(`prep:${p.id}`)),
+          empty: '未登録（志望動機・自己PRなど、面接で言うことを準備できます）',
+        }),
       ),
       h('div', { class: 'detail-meta' }, `登録 ${fmt(c.createdAt)}・更新 ${fmt(c.updatedAt)}`),
     ),
@@ -831,6 +835,132 @@ function renderDetail(id) {
   );
 }
 
+/** お題＋話すことの一覧。action(p) でお題の横に置くボタンを作る */
+function prepList(items, { action = null, empty = '未登録' } = {}) {
+  if (!items.length) return h('span', { class: 'muted' }, empty);
+  return h(
+    'ol',
+    { class: 'qa-list' },
+    items.map((p) =>
+      h(
+        'li',
+        { class: 'qa-item' },
+        h('div', { class: 'qa-q prep-topic' }, h('span', {}, p.title), action ? action(p) : null),
+        p.body ? h('div', { class: 'qa-a' }, richView(p.body, p.bodyMarks)) : h('div', { class: 'muted small' }, '未記入'),
+      ),
+    ),
+  );
+}
+
+/* ---------- 共通の面接メモ ---------- */
+function renderCommonPrep() {
+  setHeader('共通の面接メモ', { back: true });
+  const items = store.getCommonPrep();
+  const editHash = '#/prep/edit';
+  view.replaceChildren(
+    h(
+      'div',
+      { class: 'detail prep' },
+      h('p', { class: 'muted small' }, 'どの会社の面接でも使うメモです。会社の編集画面で横に出して、その会社のメモにコピーできます。'),
+      labelRow(`お題（${items.length}件）`, () => editAt(editHash, 'prep')),
+      prepList(items, {
+        action: (p) => editBtn(`お題「${p.title}」`, () => editAt(editHash, `prep:${p.id}`)),
+        empty: '未登録（自己紹介・自己PR・転職理由など、どの会社でも話すことを準備できます）',
+      }),
+    ),
+    h(
+      'div',
+      { class: 'actions', style: 'margin-top:14px' },
+      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => go(editHash) }, '編集'),
+    ),
+  );
+}
+
+function renderCommonPrepForm() {
+  setHeader('共通の面接メモを編集', { back: true, settings: false });
+  refreshView = null;
+  const existing = store.getCommonPrep();
+  const prep = fieldsEditor(existing, PREP_EDITOR);
+  const onSubmit = (e) => {
+    e.preventDefault();
+    try {
+      const saved = store.updateCommonPrep(prep.value());
+      const trashed = removedFields(existing, saved.prep).length;
+      toast(trashed ? `保存しました（消したお題${trashed}件はゴミ箱に移しました）` : '保存しました', trashed ? 4000 : 2500);
+      history.replaceState(null, '', '#/prep');
+      render();
+    } catch (err) {
+      if (err instanceof store.ValidationError) showErrors(err.errors, prep.errorTargets());
+      else toast(err.message);
+    }
+  };
+  view.replaceChildren(
+    h(
+      'form',
+      { class: 'form', novalidate: true, onsubmit: onSubmit },
+      h('div', { class: 'field', 'data-focus': 'prep', 'data-focus-sel': '.field-title-input, .btn-add' }, h('span', { class: 'label' }, '共通の面接メモ'), prep.el),
+      h(
+        'div',
+        { class: 'actions' },
+        h('button', { class: 'btn', type: 'button', onclick: () => go('#/prep') }, 'キャンセル'),
+        h('button', { class: 'btn btn-primary', type: 'submit' }, '保存'),
+      ),
+    ),
+  );
+}
+
+/**
+ * 会社の編集画面で、共通の面接メモを横（スマホは画面の下半分）に出す部品。
+ * 各お題の「この会社にコピー」で、会社ごとの欄（prepEditor）の最後に追加する。
+ */
+function commonPrepPanel(prepEditor) {
+  let open = lsGet(COMMON_PANEL_KEY) === 'open';
+  const panel = h('aside', { class: 'common-panel', 'aria-label': '共通の面接メモ' });
+  const toggle = h('button', { class: 'btn btn-small common-toggle', type: 'button', onclick: () => setOpen(!open) });
+  const draw = () => {
+    const items = store.getCommonPrep();
+    panel.replaceChildren(
+      h(
+        'div',
+        { class: 'common-panel-head' },
+        h('strong', {}, `共通の面接メモ（${items.length}件）`),
+        h('button', { class: 'icon-mini', type: 'button', 'aria-label': '閉じる', title: '閉じる', onclick: () => setOpen(false) }, '×'),
+      ),
+      h(
+        'div',
+        { class: 'common-panel-body' },
+        prepList(items, {
+          action: (p) =>
+            h(
+              'button',
+              {
+                class: 'btn btn-small copy-btn',
+                type: 'button',
+                onclick: () => {
+                  prepEditor.add(copyPrepItem(p));
+                  toast(`「${p.title}」をこの会社のメモにコピーしました`);
+                },
+              },
+              'この会社にコピー',
+            ),
+          empty: '共通の面接メモはまだありません。ホーム画面の「📝 共通の面接メモ」から書けます。',
+        }),
+      ),
+    );
+  };
+  function setOpen(v) {
+    open = v;
+    lsSet(COMMON_PANEL_KEY, v ? 'open' : 'closed');
+    toggle.textContent = open ? '共通メモを閉じる' : '共通メモを横に出す';
+    toggle.setAttribute('aria-expanded', String(open));
+    panel.hidden = !open;
+    view.classList.toggle('common-panel-open', open);
+    if (open) draw();
+  }
+  setOpen(open);
+  return { toggle, panel, close: () => view.classList.remove('common-panel-open') };
+}
+
 async function onDelete(c) {
   const n = store.sessionsFor(c.id).length;
   const extra = n ? `面接・セミナー記録${n}件も一緒に削除されます。` : '';
@@ -869,6 +999,8 @@ function renderForm(id) {
   const urlErr = h('div', { class: 'error', role: 'alert' });
   const fields = fieldsEditor(fieldsOf(existing), { usedTitles: usedFieldTitles(store.getAll()) });
   const prep = fieldsEditor(prepOf(existing), PREP_EDITOR);
+  const common = commonPrepPanel(prep);
+  leaveView = common.close;
 
   const optionsEl = h('div', { class: 'site-options', role: 'group', 'aria-label': '利用サイト' });
   const drawSites = () => {
@@ -955,7 +1087,12 @@ function renderForm(id) {
       field('求人URL', [urlInput, urlErr], { forId: 'f-url', focus: 'url', focusSel: '#f-url' }),
       h('div', { class: 'field', 'data-focus': 'memo' }, h('span', { class: 'label' }, 'メモ'), memo.el),
       h('div', { class: 'field' }, h('span', { class: 'label' }, '自分で作る項目'), fields.el),
-      h('div', { class: 'field', 'data-focus': 'prep', 'data-focus-sel': '.field-title-input, .btn-add' }, h('span', { class: 'label' }, '面接で話すこと'), prep.el),
+      h(
+        'div',
+        { class: 'field', 'data-focus': 'prep', 'data-focus-sel': '.field-title-input, .btn-add' },
+        h('div', { class: 'prep-label-row' }, h('span', { class: 'label' }, '面接で話すこと'), common.toggle),
+        prep.el,
+      ),
       h(
         'div',
         { class: 'actions' },
@@ -963,6 +1100,7 @@ function renderForm(id) {
         h('button', { class: 'btn btn-primary', type: 'submit' }, '保存'),
       ),
     ),
+    common.panel,
   );
   if (!existing) nameInput.focus();
 }
@@ -1098,6 +1236,11 @@ function fieldsEditor(initial, opts = {}) {
   );
   return {
     el,
+    /** 最後に1件足して、そこまでスクロールする（共通メモからのコピーで使う） */
+    add: (f) => {
+      addRow(f);
+      rows.at(-1).row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    },
     value: () =>
       rows.map((r) => {
         const { text, marks } = r.body.value();
@@ -1468,9 +1611,10 @@ async function onImport(file) {
     toast(`読み込めませんでした（${err.message}）`, 4000);
     return;
   }
-  const { companies: c, sessions: s } = preview;
+  const { companies: c, sessions: s, commonPrep: n } = preview;
+  const common = preview.data.notes.length ? `共通の面接メモ（お題${n}件）は今の内容と置き換わります。` : '';
   const ok = await confirmDialog(
-    `会社${c.added + c.updated}件（追加${c.added}・上書き${c.updated}）と、記録${s.added + s.updated}件（追加${s.added}・上書き${s.updated}）を読み込みます。よろしいですか？`,
+    `会社${c.added + c.updated}件（追加${c.added}・上書き${c.updated}）と、記録${s.added + s.updated}件（追加${s.added}・上書き${s.updated}）を読み込みます。${common}よろしいですか？`,
     '読み込む',
   );
   if (!ok) return;
@@ -1504,7 +1648,11 @@ function renderTrash() {
   const onRestore = (e) => {
     try {
       const where = store.restoreTrash(e.id);
-      const hash = where.sessionId ? sessionHash(where.companyId, where.sessionId) : companyHash(where.companyId);
+      const hash = where.commonPrep
+        ? '#/prep'
+        : where.sessionId
+          ? sessionHash(where.companyId, where.sessionId)
+          : companyHash(where.companyId);
       toast('元に戻しました', 4000, { label: '開く', scope: 'global', onClick: () => go(hash) });
     } catch (err) {
       toast(err.message, 5000);
@@ -1621,6 +1769,7 @@ function renderNotFound(message) {
 function parentHash() {
   const path = location.hash.replace(/^#/, '') || '/';
   if (path === '/trash') return '#/settings';
+  if (path === '/prep/edit') return '#/prep';
   let m;
   if ((m = path.match(/^\/c\/([^/]+)\/s\/([^/]+)\/edit$/))) return `#/c/${m[1]}/s/${m[2]}`;
   if ((m = path.match(/^\/c\/([^/]+)\/(edit|s\/.+)$/))) return `#/c/${m[1]}`;
@@ -1632,6 +1781,8 @@ function render({ keepScroll = false } = {}) {
   const y = window.scrollY;
   refreshView = null;
   refreshStatus = null;
+  leaveView?.();
+  leaveView = null;
   if (toastScope === 'view') hideToast();
   const path = location.hash.replace(/^#/, '') || '/';
   const dec = decodeURIComponent;
@@ -1639,6 +1790,10 @@ function render({ keepScroll = false } = {}) {
   try {
     if (path === '/new') renderForm(null);
     else if (path === '/settings') renderSettings();
+    else if (path === '/prep') {
+      renderCommonPrep();
+      refreshView = () => render({ keepScroll: true });
+    } else if (path === '/prep/edit') renderCommonPrepForm();
     else if (path === '/trash') {
       renderTrash();
       refreshView = () => render({ keepScroll: true });

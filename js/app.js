@@ -6,6 +6,8 @@ import {
   NAME_MAX,
   FIELD_TITLE_MAX,
   fieldsOf,
+  prepOf,
+  PREP_TOPIC_MAX,
   usedFieldTitles,
   newId,
   TITLE_MAX,
@@ -770,6 +772,25 @@ function renderDetail(id) {
           f.body ? richView(f.body, f.bodyMarks) : h('span', { class: 'muted' }, '未記入'),
         ),
       ),
+      h(
+        'div',
+        { class: 'prep' },
+        labelRow(`面接で話すこと（${prepOf(c).length}件）`, edit('prep')),
+        prepOf(c).length
+          ? h(
+              'ol',
+              { class: 'qa-list' },
+              prepOf(c).map((p) =>
+                h(
+                  'li',
+                  { class: 'qa-item' },
+                  h('div', { class: 'qa-q prep-topic' }, p.title, editBtn(`お題「${p.title}」`, edit(`prep:${p.id}`))),
+                  p.body ? h('div', { class: 'qa-a' }, richView(p.body, p.bodyMarks)) : h('div', { class: 'muted small' }, '未記入'),
+                ),
+              ),
+            )
+          : h('span', { class: 'muted' }, '未登録（志望動機・自己PRなど、面接で言うことを準備できます）'),
+      ),
       h('div', { class: 'detail-meta' }, `登録 ${fmt(c.createdAt)}・更新 ${fmt(c.updatedAt)}`),
     ),
     h(
@@ -846,7 +867,8 @@ function renderForm(id) {
   const memo = richEditor({ id: 'f-memo', text: existing?.memo ?? '', marks: existing?.memoMarks, placeholder: '志望動機、気になる点など', label: 'メモ' });
   const nameErr = h('div', { class: 'error', role: 'alert' });
   const urlErr = h('div', { class: 'error', role: 'alert' });
-  const fields = fieldsEditor(fieldsOf(existing), usedFieldTitles(store.getAll()));
+  const fields = fieldsEditor(fieldsOf(existing), { usedTitles: usedFieldTitles(store.getAll()) });
+  const prep = fieldsEditor(prepOf(existing), PREP_EDITOR);
 
   const optionsEl = h('div', { class: 'site-options', role: 'group', 'aria-label': '利用サイト' });
   const drawSites = () => {
@@ -896,10 +918,13 @@ function renderForm(id) {
       url: urlInput.value,
       ...(({ text, marks }) => ({ memo: text, memoMarks: marks }))(memo.value()),
       fields: fields.value(),
+      prep: prep.value(),
     };
     try {
       const saved = existing ? store.update(existing.id, input) : store.add(input);
-      const trashed = existing ? removedFields(fieldsOf(existing), saved.fields).length : 0;
+      const trashed = existing
+        ? removedFields(fieldsOf(existing), saved.fields).length + removedFields(prepOf(existing), saved.prep).length
+        : 0;
       toast(existing ? (trashed ? `保存しました（消した項目${trashed}件はゴミ箱に移しました）` : '保存しました') : '登録しました', trashed ? 4000 : 2500);
       history.replaceState(null, '', companyHash(saved.id));
       render();
@@ -909,6 +934,7 @@ function renderForm(id) {
           name: { input: nameInput, error: nameErr },
           url: { input: urlInput, error: urlErr },
           ...fields.errorTargets(),
+          ...prep.errorTargets(),
         });
       } else {
         toast(err.message);
@@ -929,6 +955,7 @@ function renderForm(id) {
       field('求人URL', [urlInput, urlErr], { forId: 'f-url', focus: 'url', focusSel: '#f-url' }),
       h('div', { class: 'field', 'data-focus': 'memo' }, h('span', { class: 'label' }, 'メモ'), memo.el),
       h('div', { class: 'field' }, h('span', { class: 'label' }, '自分で作る項目'), fields.el),
+      h('div', { class: 'field', 'data-focus': 'prep', 'data-focus-sel': '.field-title-input, .btn-add' }, h('span', { class: 'label' }, '面接で話すこと'), prep.el),
       h(
         'div',
         { class: 'actions' },
@@ -941,10 +968,39 @@ function renderForm(id) {
 }
 
 /** はじめて使うときに出す項目名の候補 */
-const FIELD_SUGGESTIONS = ['逆質問', '志望動機', '自己PR', '面接で言うこと'];
+const FIELD_SUGGESTIONS = ['逆質問', '志望動機', '自己PR'];
 
-/** 項目名と内容の組（逆質問・志望動機など）を自由に追加・削除・並べ替えできる部品 */
-function fieldsEditor(initial, usedTitles) {
+/** 「面接で話すこと」用の設定（自分で作る項目と同じ部品を、お題＋話すことの形で使う） */
+const PREP_EDITOR = {
+  key: 'prep',
+  titleLabel: 'お題',
+  titlePlaceholder: 'お題（例：志望動機）',
+  titleMax: PREP_TOPIC_MAX,
+  bodyLabel: '話すこと',
+  bodyPlaceholder: '面接で実際に言うこと',
+  noun: 'お題',
+  addLabel: '＋ お題を追加',
+  suggestions: ['自己紹介', '志望動機', '自己PR', '転職理由', '学生時代に力を入れたこと', '逆質問'],
+  usedTitles: [],
+};
+
+/**
+ * 項目名と内容の組（逆質問・志望動機など）を自由に追加・削除・並べ替えできる部品。
+ * opts を変えると「面接で話すこと」（お題＋話すこと）にも使える。
+ */
+function fieldsEditor(initial, opts = {}) {
+  const {
+    key = 'field',
+    titleLabel = '項目名',
+    titlePlaceholder = '項目名（例：逆質問）',
+    titleMax = FIELD_TITLE_MAX,
+    bodyLabel = '内容',
+    bodyPlaceholder = '内容',
+    noun = '項目',
+    addLabel = '＋ 項目を追加',
+    suggestions = FIELD_SUGGESTIONS,
+    usedTitles = [],
+  } = opts;
   const rowsEl = h('div', { class: 'qa-rows' });
   const suggestEl = h('div', { class: 'field-suggest' });
   const rows = [];
@@ -971,14 +1027,14 @@ function fieldsEditor(initial, usedTitles) {
     const title = h('input', {
       type: 'text',
       class: 'field-title-input',
-      maxlength: String(FIELD_TITLE_MAX),
-      placeholder: '項目名（例：逆質問）',
-      'aria-label': '項目名',
+      maxlength: String(titleMax),
+      placeholder: titlePlaceholder,
+      'aria-label': titleLabel,
       autocomplete: 'off',
       value: f.title ?? '',
       oninput: () => drawSuggestions(),
     });
-    const body = richEditor({ text: f.body ?? '', marks: f.bodyMarks, placeholder: '内容', label: '内容' });
+    const body = richEditor({ text: f.body ?? '', marks: f.bodyMarks, placeholder: bodyPlaceholder, label: bodyLabel });
     body.area.classList.add('field-body-input');
     const error = h('div', { class: 'error', role: 'alert' });
     const up = h('button', { class: 'icon-mini', type: 'button', 'aria-label': '上へ', title: '上へ', onclick: () => move(entry, -1) }, '↑');
@@ -993,7 +1049,7 @@ function fieldsEditor(initial, usedTitles) {
           rows.splice(at, 1);
           redraw();
           const name = title.value.trim() || '名前なし';
-          toast(`項目「${name}」を消しました`, UNDO_MS, {
+          toast(`${noun}「${name}」を消しました`, UNDO_MS, {
             label: '元に戻す',
             scope: 'view',
             onClick: () => {
@@ -1005,12 +1061,12 @@ function fieldsEditor(initial, usedTitles) {
           });
         },
       },
-      'この項目を消す',
+      `この${noun}を消す`,
     );
     const id = f.id || newId();
     const row = h(
       'div',
-      { class: 'qa-row custom-field-row', 'data-focus': `field:${id}` },
+      { class: 'qa-row custom-field-row', 'data-focus': `${key}:${id}` },
       h('div', { class: 'qa-row-head' }, h('div', { class: 'row-move' }, up, down), del),
       title,
       error,
@@ -1024,7 +1080,7 @@ function fieldsEditor(initial, usedTitles) {
   };
   function drawSuggestions() {
     const have = new Set(rows.map((r) => r.title.value.trim()));
-    const titles = [...new Set([...usedTitles, ...FIELD_SUGGESTIONS])].filter((t) => !have.has(t)).slice(0, 8);
+    const titles = [...new Set([...usedTitles, ...suggestions])].filter((t) => !have.has(t)).slice(0, 8);
     suggestEl.replaceChildren(
       ...(titles.length ? [h('span', { class: 'muted small' }, '候補：')] : []),
       ...titles.map((t) => h('button', { class: 'site-option', type: 'button', onclick: () => addRow({ title: t }, 'body') }, `＋ ${t}`)),
@@ -1037,7 +1093,7 @@ function fieldsEditor(initial, usedTitles) {
     'div',
     {},
     rowsEl,
-    h('button', { class: 'btn btn-small btn-add', type: 'button', onclick: () => addRow({}, 'title') }, '＋ 項目を追加'),
+    h('button', { class: 'btn btn-small btn-add', type: 'button', onclick: () => addRow({}, 'title') }, addLabel),
     suggestEl,
   );
   return {
@@ -1047,7 +1103,7 @@ function fieldsEditor(initial, usedTitles) {
         const { text, marks } = r.body.value();
         return { id: r.id, title: r.title.value, body: text, bodyMarks: marks };
       }),
-    errorTargets: () => Object.fromEntries(rows.map((r) => [`field:${r.id}`, { input: r.title, error: r.error }])),
+    errorTargets: () => Object.fromEntries(rows.map((r) => [`${key}:${r.id}`, { input: r.title, error: r.error }])),
   };
 }
 

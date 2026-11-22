@@ -25,6 +25,7 @@ import {
   removedFields,
   insertField,
   fieldsOf,
+  prepOf,
   sortTrash,
   trashDaysLeft,
 } from './model.js';
@@ -262,6 +263,9 @@ export function update(id, rawInput) {
   for (const { field, index } of removedFields(fieldsOf(existing), company.fields)) {
     putTrash(batch, createTrashEntry('field', { companyId: company.id, companyName: company.name, field, index }));
   }
+  for (const { field, index } of removedFields(prepOf(existing), company.prep)) {
+    putTrash(batch, createTrashEntry('prep', { companyId: company.id, companyName: company.name, field, index }));
+  }
   companies.set(company.id, company);
   fire(batch.commit());
   return company;
@@ -372,6 +376,13 @@ export function restoreTrash(trashId) {
     const c = get(entry.companyId);
     if (!c) throw new Error(missingCompanyMessage(entry.companyId, entry.companyName));
     const company = { ...c, fields: insertField(fieldsOf(c), entry.field, entry.index), updatedAt: new Date().toISOString() };
+    batch.set(userDoc('companies', company.id), company);
+    companies.set(company.id, company);
+    result = { companyId: company.id };
+  } else if (entry.kind === 'prep' && entry.field?.id) {
+    const c = get(entry.companyId);
+    if (!c) throw new Error(missingCompanyMessage(entry.companyId, entry.companyName));
+    const company = { ...c, prep: insertField(prepOf(c), entry.field, entry.index), updatedAt: new Date().toISOString() };
     batch.set(userDoc('companies', company.id), company);
     companies.set(company.id, company);
     result = { companyId: company.id };

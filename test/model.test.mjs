@@ -24,6 +24,7 @@ import {
   BACKUP_FORMAT,
   pickNewer,
   fieldsOf,
+  prepOf,
   usedFieldTitles,
   normalizeMarks,
   cleanRich,
@@ -53,7 +54,7 @@ const mk = (over = {}) => ({
 
 test('normalizeInput trims and dedupes sites', () => {
   const r = normalizeInput({ name: '  株式会社X ', sites: ['doda', ' doda ', '', 'Green'], url: ' https://x.jp ', memo: 'メモ\n\n' });
-  assert.deepEqual(r, { name: '株式会社X', sites: ['doda', 'Green'], url: 'https://x.jp', memo: 'メモ', memoMarks: [], fields: [] });
+  assert.deepEqual(r, { name: '株式会社X', sites: ['doda', 'Green'], url: 'https://x.jp', memo: 'メモ', memoMarks: [], fields: [], prep: [] });
 });
 
 test('validate requires name', () => {
@@ -118,7 +119,7 @@ const mkSession = (over = {}) => ({
 });
 
 test('backup round trip with sessions', () => {
-  const list = [mk({ id: 'a', name: 'X', sites: ['doda'], url: 'https://x.jp', memo: 'm', fields: [{ id: 'f', title: '逆質問', body: 'b', bodyMarks: [{ s: 0, e: 1, t: 'hl' }] }] })];
+  const list = [mk({ id: 'a', name: 'X', sites: ['doda'], url: 'https://x.jp', memo: 'm', fields: [{ id: 'f', title: '逆質問', body: 'b', bodyMarks: [{ s: 0, e: 1, t: 'hl' }] }], prep: [{ id: 'p', title: '志望動機', body: 'c', bodyMarks: [] }] })];
   const sessions = [mkSession({ id: 's1' })];
   const text = JSON.stringify(toBackup(list, sessions));
   assert.deepEqual(parseBackup(text), { companies: list, sessions });
@@ -127,7 +128,7 @@ test('backup round trip with sessions', () => {
 test('parseBackup reads old version-1 files (companies only)', () => {
   const list = [mk({ id: 'a' })];
   const v1 = JSON.stringify({ format: BACKUP_FORMAT, version: 1, exportedAt: 'x', companies: list });
-  assert.deepEqual(parseBackup(v1), { companies: list.map((c) => ({ ...c, fields: [] })), sessions: [] });
+  assert.deepEqual(parseBackup(v1), { companies: list.map((c) => ({ ...c, fields: [], prep: [] })), sessions: [] });
 });
 
 test('parseBackup rejects broken files', () => {
@@ -374,4 +375,40 @@ test('trash: removed fields keep their position and come back to it', () => {
   assert.deepEqual(insertField([f('a')], f('b'), 9).map((x) => x.id), ['a', 'b']);
   assert.deepEqual(insertField([f('a'), f('b')], f('b'), 0).map((x) => x.id), ['a', 'b']);
   assert.deepEqual(removedFields(undefined, []), []);
+});
+
+/* ---------- 面接で話すこと ---------- */
+
+test('prep: normalized like fields, validated, searchable and kept in backups', () => {
+  const input = normalizeInput({
+    name: 'A社',
+    prep: [
+      { id: 'p1', title: ' 志望動機 ', body: '業務改善にAIを使いたい', bodyMarks: [{ s: 0, e: 4, t: 'hl' }] },
+      { title: '', body: '' }, // お題も話すことも空なら捨てる
+      { title: '自己PR', body: '' },
+    ],
+  });
+  assert.equal(input.prep.length, 2);
+  assert.equal(input.prep[0].title, '志望動機');
+  assert.deepEqual(input.prep[0].bodyMarks, [{ s: 0, e: 4, t: 'hl' }]);
+  assert.ok(input.prep[1].id, '新しいお題には id が振られる');
+
+  // お題が空で話すことだけある行はエラー
+  const noTopic = normalizeInput({ name: 'A社', prep: [{ id: 'x', title: '', body: '話すことだけ' }] });
+  assert.equal(validate(noTopic)['prep:x'], 'お題を入力してください');
+  const long = normalizeInput({ name: 'A社', prep: [{ id: 'y', title: 'あ'.repeat(101), body: '' }] });
+  assert.match(validate(long)['prep:y'], /100文字/);
+  assert.deepEqual(validate(input), {});
+
+  const a = { ...mk({ id: 'a', name: 'A社' }), prep: input.prep };
+  const old = mk({ id: 'c', name: 'C社' }); // prep が無い古いデータ
+  assert.deepEqual(prepOf(old), []);
+  assert.deepEqual(filterCompanies([a, old], { query: '業務改善' }).map((c) => c.id), ['a']);
+  const back = parseBackup(JSON.stringify(toBackup([a, old], [])));
+  assert.deepEqual(back.companies[0].prep, a.prep);
+  assert.deepEqual(back.companies[1].prep, []);
+  assert.equal(
+    trashLabel({ kind: 'prep', companyName: 'A社', field: { title: '志望動機' } }),
+    '「A社」の面接で話すこと「志望動機」',
+  );
 });

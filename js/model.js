@@ -13,6 +13,8 @@ export const PRESET_SITES = [
 export const NAME_MAX = 100;
 /** 自分で作る項目（逆質問・志望動機など）の項目名の長さの上限 */
 export const FIELD_TITLE_MAX = 50;
+/** 「面接で話すこと」のお題の長さの上限 */
+export const PREP_TOPIC_MAX = 100;
 export const BACKUP_FORMAT = 'job-change-app-backup';
 export const BACKUP_VERSION = 2;
 
@@ -38,6 +40,8 @@ export function normalizeInput(input) {
     url: String(input.url ?? '').trim(),
     ...richPair('memo', cleanRich(input.memo, input.memoMarks)),
     fields: normalizeFields(input.fields),
+    // 面接で話すこと。形は自分で作る項目と同じ [{ id, title: お題, body: 話すこと, bodyMarks }]
+    prep: normalizeFields(input.prep),
   };
 }
 
@@ -65,6 +69,9 @@ export function normalizeFields(fields) {
 /** 会社の項目一覧（古いデータには fields が無いので空にする） */
 export const fieldsOf = (c) => (Array.isArray(c?.fields) ? c.fields : []);
 
+/** 会社の「面接で話すこと」一覧（古いデータには prep が無いので空にする） */
+export const prepOf = (c) => (Array.isArray(c?.prep) ? c.prep : []);
+
 /** 入力チェック。問題があれば { 項目名: メッセージ } を返す。問題なしなら空オブジェクト */
 export function validate(input) {
   const errors = {};
@@ -80,6 +87,11 @@ export function validate(input) {
   for (const f of input.fields ?? []) {
     if (!f.title) errors[`field:${f.id}`] = '項目名を入力してください';
     else if (f.title.length > FIELD_TITLE_MAX) errors[`field:${f.id}`] = `項目名は${FIELD_TITLE_MAX}文字以内にしてください`;
+  }
+  // 面接で話すことのエラーは `prep:{id}` に入れる
+  for (const p of input.prep ?? []) {
+    if (!p.title) errors[`prep:${p.id}`] = 'お題を入力してください';
+    else if (p.title.length > PREP_TOPIC_MAX) errors[`prep:${p.id}`] = `お題は${PREP_TOPIC_MAX}文字以内にしてください`;
   }
   return errors;
 }
@@ -108,11 +120,11 @@ export function updateCompany(existing, input, now = new Date()) {
   return { ...existing, ...input, id: existing.id, createdAt: existing.createdAt, updatedAt: now.toISOString() };
 }
 
-/** 検索語（会社名・メモ・自分で作った項目）とサイトで絞り込み、更新が新しい順に並べる */
+/** 検索語（会社名・メモ・自分で作った項目・面接で話すこと）とサイトで絞り込み、更新が新しい順に並べる */
 export function filterCompanies(companies, { query = '', site = '' } = {}) {
   const q = query.trim().toLowerCase();
   const hit = (c) =>
-    [c.name, c.memo, ...fieldsOf(c).flatMap((f) => [f.title, f.body])].some((t) => String(t ?? '').toLowerCase().includes(q));
+    [c.name, c.memo, ...[...fieldsOf(c), ...prepOf(c)].flatMap((f) => [f.title, f.body])].some((t) => String(t ?? '').toLowerCase().includes(q));
   return companies
     .filter((c) => !site || c.sites.includes(site))
     .filter((c) => !q || hit(c))
@@ -423,7 +435,7 @@ export function markSegments(text, marks) {
 export const TRASH_DAYS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** ゴミ箱に入れる1件を作る。kind: 'company' | 'session' | 'field' */
+/** ゴミ箱に入れる1件を作る。kind: 'company' | 'session' | 'field' | 'prep' */
 export function createTrashEntry(kind, data, now = new Date()) {
   return { id: newId(), kind, deletedAt: now.toISOString(), ...data };
 }
@@ -446,6 +458,8 @@ export function trashLabel(entry) {
       return `「${entry.companyName ?? ''}」の記録「${entry.session ? sessionLabel(entry.session) : ''}」`;
     case 'field':
       return `「${entry.companyName ?? ''}」の項目「${entry.field?.title ?? ''}」`;
+    case 'prep':
+      return `「${entry.companyName ?? ''}」の面接で話すこと「${entry.field?.title ?? ''}」`;
     default:
       return '不明なデータ';
   }

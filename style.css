@@ -305,6 +305,9 @@ button:disabled { opacity: 0.6; }
 .sync-status[data-status="pending"]::before { color: #e0a100; }
 .sync-status[data-status="offline"]::before { color: var(--muted); }
 
+/* 面接で話すこと（詳細画面） */
+.prep .prep-topic { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+
 /* 自分で作る項目 */
 .custom-field-title { font-size: 13px; color: var(--muted); margin-bottom: 4px; word-break: break-word; }
 .custom-field-row .field-title-input { font-weight: 600; }

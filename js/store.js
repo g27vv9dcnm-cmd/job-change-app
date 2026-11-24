@@ -14,6 +14,8 @@ import {
   validate,
   createCompany,
   updateCompany,
+  moveCompany,
+  orderKey,
   normalizeSessionInput,
   validateSession,
   createSession,
@@ -251,7 +253,7 @@ export function add(rawInput) {
   const input = normalizeInput(rawInput);
   const errors = validate(input);
   if (Object.keys(errors).length) throw new ValidationError(errors);
-  const company = createCompany(input);
+  const company = createCompany(input, new Date(), getAll());
   companies.set(company.id, company);
   fire(fb.setDoc(userDoc('companies', company.id), company));
   return company;
@@ -276,6 +278,23 @@ export function update(id, rawInput) {
   companies.set(company.id, company);
   fire(batch.commit());
   return company;
+}
+
+/**
+ * ホームの並び順で、会社を toIndex 番目（ほかの会社だけを並べたときの位置。0 が一番上）へ動かす。
+ * 並び順（order）だけを書き換え、更新日時は変えない。
+ */
+export function moveCompanyTo(id, toIndex) {
+  const changes = moveCompany(getAll(), id, toIndex);
+  if (!changes.length) return;
+  const batch = fb.writeBatch(db);
+  for (const { id: cid, order } of changes) {
+    const c = companies.get(cid);
+    companies.set(cid, { ...c, order });
+    batch.update(userDoc('companies', cid), { order });
+  }
+  fire(batch.commit());
+  emitData();
 }
 
 /** 会社と、その会社の記録をまとめてゴミ箱に移す。戻すときに使うゴミ箱のIDを返す */
@@ -404,14 +423,14 @@ export function restoreTrash(trashId) {
   } else if (entry.kind === 'field' && entry.field?.id) {
     const c = get(entry.companyId);
     if (!c) throw new Error(missingCompanyMessage(entry.companyId, entry.companyName));
-    const company = { ...c, fields: insertField(fieldsOf(c), entry.field, entry.index), updatedAt: new Date().toISOString() };
+    const company = { ...c, fields: insertField(fieldsOf(c), entry.field, entry.index), order: orderKey(c), updatedAt: new Date().toISOString() };
     batch.set(userDoc('companies', company.id), company);
     companies.set(company.id, company);
     result = { companyId: company.id };
   } else if (entry.kind === 'prep' && entry.field?.id) {
     const c = get(entry.companyId);
     if (!c) throw new Error(missingCompanyMessage(entry.companyId, entry.companyName));
-    const company = { ...c, prep: insertField(prepOf(c), entry.field, entry.index), updatedAt: new Date().toISOString() };
+    const company = { ...c, prep: insertField(prepOf(c), entry.field, entry.index), order: orderKey(c), updatedAt: new Date().toISOString() };
     batch.set(userDoc('companies', company.id), company);
     companies.set(company.id, company);
     result = { companyId: company.id };

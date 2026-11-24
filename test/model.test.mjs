@@ -42,6 +42,11 @@ import {
   sortTrash,
   removedFields,
   insertField,
+  orderKey,
+  sortCompanies,
+  topOrder,
+  moveCompany,
+  ORDER_STEP,
 } from "../js/model.js";
 
 const mk = (over = {}) => ({
@@ -445,4 +450,87 @@ test('common prep: note shape, copy to a company and backup round trip', () => {
   assert.equal('notes' in toBackup([], []), false);
   assert.throws(() => parseBackup(JSON.stringify({ ...toBackup([], []), notes: [{ id: 'other', prep: [] }] })), /共通の面接メモ/);
   assert.equal(trashLabel({ kind: 'commonPrep', field: { title: '自己PR' } }), '共通の面接メモ「自己PR」');
+});
+
+/* ---------- ホームの並び順 ---------- */
+
+/** moveCompany の結果を当てはめて、並んだ id を返す */
+const applyMove = (list, changes) => {
+  const by = new Map(changes.map((c) => [c.id, c.order]));
+  return sortCompanies(list.map((c) => (by.has(c.id) ? { ...c, order: by.get(c.id) } : c)));
+};
+const ids = (list) => list.map((c) => c.id);
+
+test('order: old data without order keeps newest-updated first', () => {
+  const list = [
+    mk({ id: 'a', updatedAt: '2026-01-01T00:00:00Z' }),
+    mk({ id: 'b', updatedAt: '2026-03-01T00:00:00Z' }),
+    mk({ id: 'c', updatedAt: '2026-02-01T00:00:00Z' }),
+  ];
+  assert.deepEqual(ids(sortCompanies(list)), ['b', 'c', 'a']);
+  assert.equal(orderKey({ id: 'x' }), 0);
+  assert.equal(orderKey(mk({ order: 5 })), 5);
+});
+
+test('order: a new company goes to the top, editing does not move it', () => {
+  const now = new Date('2026-11-24T00:00:00Z');
+  const old = [mk({ id: 'a', order: -now.getTime() - 10 * ORDER_STEP })]; // 未来の時刻より上に動かしてあっても
+  const c = createCompany(normalizeInput({ name: 'X' }), now, old);
+  assert.ok(c.order < orderKey(old[0]));
+  assert.equal(topOrder([], now), -now.getTime());
+
+  const legacy = mk({ id: 'l', updatedAt: '2026-02-01T00:00:00.000Z' });
+  const edited = updateCompany(legacy, normalizeInput({ name: 'Y' }), new Date('2026-12-01T00:00:00Z'));
+  assert.equal(edited.order, orderKey(legacy)); // 編集前の位置のまま
+  const again = updateCompany({ ...edited, order: 42 }, normalizeInput({ name: 'Z' }));
+  assert.equal(again.order, 42);
+});
+
+test('order: moving changes only the moved company', () => {
+  const list = [
+    mk({ id: 'a', updatedAt: '2026-03-01T00:00:00Z' }),
+    mk({ id: 'b', updatedAt: '2026-02-01T00:00:00Z' }),
+    mk({ id: 'c', updatedAt: '2026-01-01T00:00:00Z' }),
+  ];
+  // 一番下へ
+  let ch = moveCompany(list, 'a', 2);
+  assert.equal(ch.length, 1);
+  assert.deepEqual(ids(applyMove(list, ch)), ['b', 'c', 'a']);
+  // 一番上へ
+  ch = moveCompany(list, 'c', 0);
+  assert.deepEqual(ids(applyMove(list, ch)), ['c', 'a', 'b']);
+  // 間へ
+  ch = moveCompany(list, 'c', 1);
+  assert.deepEqual(ids(applyMove(list, ch)), ['a', 'c', 'b']);
+  // 動かない・存在しない・1件だけ
+  assert.deepEqual(moveCompany(list, 'b', 1), []);
+  assert.deepEqual(moveCompany(list, 'zzz', 0), []);
+  assert.deepEqual(moveCompany([list[0]], 'a', 0), []);
+  // はみ出した位置は端に寄せる
+  assert.deepEqual(ids(applyMove(list, moveCompany(list, 'a', 99))), ['b', 'c', 'a']);
+  assert.deepEqual(ids(applyMove(list, moveCompany(list, 'c', -5))), ['c', 'a', 'b']);
+});
+
+test('order: renumbers when there is no room left between two companies', () => {
+  let list = [mk({ id: 'a', order: 0 }), mk({ id: 'b', order: 1e-300 }), mk({ id: 'c', order: 2e-300 })];
+  // 同じ order 同士（同時刻のデータなど）でも入れられる
+  list.push(mk({ id: 'd', order: 1e-300 }));
+  for (let i = 0; i < 80; i++) {
+    const sorted = sortCompanies(list);
+    const id = sorted[sorted.length - 1].id;
+    const ch = moveCompany(list, id, 1);
+    const expected = ids(sorted).filter((x) => x !== id);
+    expected.splice(1, 0, id);
+    list = applyMove(list, ch);
+    assert.deepEqual(ids(list), expected, `move #${i}`);
+  }
+});
+
+test('order: survives a backup round trip and filters keep the order', () => {
+  const list = [mk({ id: 'a', order: 10 }), mk({ id: 'b', order: 5, name: 'B社' }), mk({ id: 'c' })];
+  const back = parseBackup(JSON.stringify(toBackup(list, [])));
+  assert.equal(back.companies[0].order, 10);
+  assert.equal(back.companies[2].order, undefined);
+  assert.deepEqual(ids(filterCompanies(list)), ['c', 'b', 'a']);
+  assert.deepEqual(ids(filterCompanies(list, { query: 'B社' })), ['b']);
 });

@@ -1,6 +1,7 @@
 // 画面の切り替えと入力チェック。保存・同期は store.js、データ処理は model.js が担当する。
 import * as store from './store.js';
 import { readLegacyCompanies } from './legacy.js';
+import { sortable } from './sortable.js';
 import {
   PRESET_SITES,
   NAME_MAX,
@@ -683,6 +684,7 @@ function renderList() {
     },
   });
   const toolbar = h('div', { class: 'toolbar' }, search, filtersEl);
+  const sortHint = h('p', { class: 'sort-hint muted small', hidden: true }, '右の ⠿ を押したまま上下に動かすと、順番を入れ替えられます');
   const commonBtn = h(
     'button',
     { class: 'btn common-prep-btn', type: 'button', onclick: () => go('#/prep') },
@@ -699,7 +701,7 @@ function renderList() {
       return;
     }
     commonBtn.textContent = `📝 共通の面接メモ（${store.getCommonPrep().length}件）`;
-    if (!view.contains(toolbar)) view.replaceChildren(commonBtn, toolbar, countEl, listEl);
+    if (!view.contains(toolbar)) view.replaceChildren(commonBtn, toolbar, countEl, sortHint, listEl);
 
     const sites = usedSites(all);
     if (listState.site && !sites.includes(listState.site)) listState.site = '';
@@ -728,13 +730,18 @@ function renderList() {
       listEl.replaceChildren(h('li', { class: 'empty' }, '条件に合う会社はありません'));
       return;
     }
+    // 検索・絞り込み中は一部の会社しか見えず、どこに入れるかがあいまいになるので並べ替えない
+    const canSort = !listState.query.trim() && !listState.site && items.length > 1;
+    sortHint.hidden = !canSort || hintSeen();
     const allSessions = store.getAllSessions();
+    // 作り直す前につまみにフォーカスがあったら、作り直したあとも同じ会社のつまみに戻す（↑↓キーで続けて動かせるように）
+    const focusedId = document.activeElement?.matches?.('.drag-handle') ? document.activeElement.closest('.card-row')?.dataset.id : null;
     listEl.replaceChildren(
       ...items.map((c) => {
         const n = allSessions.filter((s) => s.companyId === c.id).length;
         return h(
           'li',
-          {},
+          { class: 'card-row', 'data-id': c.id },
           h(
             'button',
             { class: 'card', type: 'button', onclick: () => go(companyHash(c.id)) },
@@ -743,13 +750,57 @@ function renderList() {
             c.memo ? h('div', { class: 'card-memo' }, c.memo) : null,
             n ? h('div', { class: 'card-meta' }, `面接・セミナー記録 ${n}件`) : null,
           ),
+          canSort ? dragHandle(`「${c.name}」`) : null,
         );
       }),
     );
+    if (focusedId) listEl.querySelector(`.card-row[data-id="${CSS.escape(focusedId)}"] .drag-handle`)?.focus({ preventScroll: true });
   }
 
+  // つまみ（⠿）で会社の順番を入れ替える。動かした会社の並び順だけを保存する
+  let pending = false; // ドラッグ中に届いた同期を、離したあとで画面に出す
+  const sorter = sortable(listEl, {
+    item: '.card-row',
+    handle: '.drag-handle',
+    insets: sortInsets,
+    onEnd: () => {
+      if (pending) {
+        pending = false;
+        update();
+      }
+    },
+    onMove: (from, to, rowEl, how) => {
+      const id = rowEl.dataset.id;
+      markHintSeen();
+      store.moveCompanyTo(id, to); // 保存すると画面も作り直される（つまみのフォーカスは update() が戻す）
+      const handle = listEl.querySelector(`.card-row[data-id="${CSS.escape(id)}"] .drag-handle`);
+      handle?.focus({ preventScroll: true });
+      if (how === 'key') handle?.closest('.card-row').scrollIntoView({ block: 'nearest' });
+    },
+  });
+  // ドラッグ中に同期で一覧が作り直されると、つかんでいる行が消えてしまうので、離すまで待つ
+  const refresh = () => (sorter.isDragging() ? (pending = true) : update());
+
   update();
-  refreshView = update;
+  refreshView = refresh;
+}
+
+/** 「⠿で並べ替えられます」の案内は、一度並べ替えたら出さない */
+const HINT_KEY = 'sort-hint-seen';
+function hintSeen() {
+  try {
+    return localStorage.getItem(HINT_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+function markHintSeen() {
+  try {
+    localStorage.setItem(HINT_KEY, '1');
+  } catch {
+    // 保存できなくても困らない
+  }
+  document.querySelector('.sort-hint')?.setAttribute('hidden', '');
 }
 
 /* ---------- 会社の詳細 ---------- */
@@ -1122,6 +1173,25 @@ const PREP_EDITOR = {
   usedTitles: [],
 };
 
+/** ドラッグで並べ替えるためのつまみ（⠿）。押したまま上下に動かす。フォーカスして ↑↓ キーでも動かせる */
+function dragHandle(noun) {
+  return h(
+    'button',
+    { class: 'icon-mini drag-handle', type: 'button', 'aria-label': `${noun}の並べ替え（押したまま上下に動かす。↑↓キーでも動かせます）`, title: '押したまま上下に動かして並べ替え' },
+    '⠿',
+  );
+}
+
+/** 自動スクロールのとき、上の固定ヘッダーと、スマホで下半分に出ている共通メモの分をよける */
+function sortInsets() {
+  const top = document.querySelector('.bar')?.getBoundingClientRect().bottom ?? 0;
+  const panel = document.querySelector('.common-panel:not([hidden])');
+  const pr = panel?.getBoundingClientRect();
+  // 下に出ているとき（スマホ）だけよける。PCでは右側に出るので関係ない
+  const bottom = pr && pr.top > window.innerHeight / 3 && pr.left < 10 ? window.innerHeight - pr.top : 0;
+  return { top, bottom };
+}
+
 /**
  * 項目名と内容の組（逆質問・志望動機など）を自由に追加・削除・並べ替えできる部品。
  * opts を変えると「面接で話すこと」（お題＋話すこと）にも使える。
@@ -1162,19 +1232,35 @@ function fieldsEditor(initial, opts = {}) {
     (btn.disabled ? (d < 0 ? entry.down : entry.up) : btn).focus();
   };
   const addRow = (f = {}, focus = null) => {
-    const title = h('input', {
-      type: 'text',
+    // 長いお題も全文見えるよう、折り返して縦に伸びる欄にする（改行は入れず、1行の文章として保存する）
+    const title = h('textarea', {
       class: 'field-title-input',
+      rows: '1',
       maxlength: String(titleMax),
       placeholder: titlePlaceholder,
       'aria-label': titleLabel,
       autocomplete: 'off',
+      enterkeyhint: 'next',
       value: f.title ?? '',
-      oninput: () => drawSuggestions(),
+      onkeydown: (e) => {
+        if (e.key === 'Enter' && !e.isComposing) {
+          e.preventDefault();
+          body.area.focus(); // Enter で「話すこと」の欄へ進む
+        }
+      },
+      oninput: () => {
+        if (/[\r\n]/.test(title.value)) {
+          const at = title.selectionStart;
+          title.value = title.value.replace(/\r\n?|\n/g, ' ');
+          title.setSelectionRange(at, at);
+        }
+        drawSuggestions();
+      },
     });
     const body = richEditor({ text: f.body ?? '', marks: f.bodyMarks, placeholder: bodyPlaceholder, label: bodyLabel });
     body.area.classList.add('field-body-input');
     const error = h('div', { class: 'error', role: 'alert' });
+    const grip = dragHandle(noun);
     const up = h('button', { class: 'icon-mini', type: 'button', 'aria-label': '上へ', title: '上へ', onclick: () => move(entry, -1) }, '↑');
     const down = h('button', { class: 'icon-mini', type: 'button', 'aria-label': '下へ', title: '下へ', onclick: () => move(entry, 1) }, '↓');
     const del = h(
@@ -1205,7 +1291,7 @@ function fieldsEditor(initial, opts = {}) {
     const row = h(
       'div',
       { class: 'qa-row custom-field-row', 'data-focus': `${key}:${id}` },
-      h('div', { class: 'qa-row-head' }, h('div', { class: 'row-move' }, up, down), del),
+      h('div', { class: 'qa-row-head' }, h('div', { class: 'row-move' }, grip, up, down), del),
       title,
       error,
       body.el,
@@ -1224,6 +1310,20 @@ function fieldsEditor(initial, opts = {}) {
       ...titles.map((t) => h('button', { class: 'site-option', type: 'button', onclick: () => addRow({ title: t }, 'body') }, `＋ ${t}`)),
     );
   }
+
+  // つまみ（⠿）でのドラッグ・↑↓キーでの並べ替え。画面の行の順番に rows を合わせる
+  sortable(rowsEl, {
+    item: '.qa-row',
+    handle: '.drag-handle',
+    insets: sortInsets,
+    onMove: (from, to, rowEl, how) => {
+      const [entry] = rows.splice(from, 1);
+      rows.splice(to, 0, entry);
+      redraw();
+      if (how === 'key') rowEl.scrollIntoView({ block: 'nearest' });
+      rowEl.querySelector('.drag-handle')?.focus({ preventScroll: true });
+    },
+  });
 
   initial.forEach((f) => addRow(f));
   redraw();

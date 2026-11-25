@@ -184,6 +184,47 @@ function go(hash) {
   else location.hash = hash;
 }
 
+/* ---------- 編集画面の共通部品 ---------- */
+/** 編集画面で「保存していない変更があるか」を調べる関数（編集画面を開いている間だけ入る） */
+let hasUnsaved = null;
+
+/** 編集画面を閉じる。保存していない変更があれば、閉じてよいか確かめる */
+async function leaveForm(hash) {
+  if (hasUnsaved?.()) {
+    const ok = await confirmDialog('保存していない変更があります。保存せずに閉じますか？', '保存せずに閉じる', {
+      danger: true,
+      cancelLabel: '編集を続ける',
+    });
+    if (!ok) return;
+  }
+  hasUnsaved = null;
+  go(hash);
+}
+
+/** 編集画面の一番下に固定する「閉じる」「保存」ボタン（スクロールしても常に押せる） */
+function formActions(onClose) {
+  return h(
+    'div',
+    { class: 'actions form-actions' },
+    h('button', { class: 'btn', type: 'button', onclick: onClose }, '閉じる'),
+    h('button', { class: 'btn btn-primary', type: 'submit' }, '保存'),
+  );
+}
+
+/**
+ * 入力内容が保存したときから変わったかを見張る。collect は今の入力内容を返す関数。
+ * 画面を作り終えてから呼ぶ。保存できたら mark() で「今の内容が保存済み」とする。
+ */
+function trackUnsaved(collect) {
+  let saved = JSON.stringify(collect());
+  hasUnsaved = () => JSON.stringify(collect()) !== saved;
+  return {
+    mark: () => {
+      saved = JSON.stringify(collect());
+    },
+  };
+}
+
 function chips(items) {
   return h('div', { class: 'chips' }, items.map((s) => h('span', { class: 'chip' }, s)));
 }
@@ -214,17 +255,52 @@ function showErrors(errors, map) {
 }
 
 /* ---------- 見ている項目から編集を開く ---------- */
-/** 次に開く編集画面で、自動でスクロールして入力を始める場所（data-focus の値） */
+/**
+ * 次に開く編集画面で、自動でスクロールする場所。
+ * { target: data-focus の値, focus: 入力を始めるか, offset: 画面の上からの位置（focus しないとき） }
+ */
 let pendingFocus = null;
 
 function editAt(hash, target) {
-  pendingFocus = target;
+  pendingFocus = { target, focus: true };
   go(hash);
 }
 
+/** 詳細画面の ✎ 用。押すとその項目の編集を開く関数（どの項目かを .target に持つ） */
+const editTo = (hash, target) => Object.assign(() => editAt(hash, target), { target });
+
 /** 詳細画面の見出しの横に置く「✎」ボタン */
 function editBtn(label, onClick) {
-  return h('button', { class: 'edit-mini', type: 'button', 'aria-label': `${label}を編集`, title: `${label}を編集`, onclick: onClick }, '✎');
+  return h(
+    'button',
+    {
+      class: 'edit-mini',
+      type: 'button',
+      'aria-label': `${label}を編集`,
+      title: `${label}を編集`,
+      'data-edit-target': onClick.target ?? null,
+      onclick: onClick,
+    },
+    '✎',
+  );
+}
+
+/** ヘッダーの下端（画面の上からの位置） */
+const headerBottom = () => document.querySelector('.bar')?.getBoundingClientRect().bottom ?? 0;
+
+/**
+ * 詳細画面の大きな「編集」ボタン用。今画面に見えている一番上の項目の位置から、編集画面を開く。
+ * 一番上を見ているときは、今まで通り編集画面の一番上から開く。
+ */
+function editFromView(hash) {
+  const top = headerBottom();
+  const seen = [...view.querySelectorAll('[data-edit-target]')].find((b) => b.getBoundingClientRect().bottom > top + 4);
+  if (window.scrollY > 40 && seen) {
+    // 見えていた項目が、編集画面でもだいたい同じ高さに来るようにする（入力は始めない）
+    const offset = Math.max(8, seen.getBoundingClientRect().top - top);
+    pendingFocus = { target: seen.dataset.editTarget, focus: false, offset };
+  }
+  go(hash);
 }
 
 /** 見出し＋✎ */
@@ -243,11 +319,17 @@ function placeCaretAtEnd(el) {
 
 /** 編集画面を開いた直後に、✎ を押した項目までスクロールして入力できる状態にする */
 function applyPendingFocus() {
-  const target = pendingFocus;
+  const pending = pendingFocus;
   pendingFocus = null;
-  if (!target) return;
-  const el = [...view.querySelectorAll('[data-focus]')].find((e) => e.dataset.focus === target);
+  if (!pending) return;
+  const el = [...view.querySelectorAll('[data-focus]')].find((e) => e.dataset.focus === pending.target);
   if (!el) return;
+  if (!pending.focus) {
+    requestAnimationFrame(() => {
+      window.scrollTo(0, window.scrollY + el.getBoundingClientRect().top - headerBottom() - pending.offset);
+    });
+    return;
+  }
   const pick = (sel) => (el.matches(sel) ? el : el.querySelector(sel));
   const input = el.dataset.focusSel ? pick(el.dataset.focusSel) : pick('.rich-input') || pick('textarea, input, button');
   requestAnimationFrame(() => {
@@ -599,6 +681,7 @@ function renderLogin() {
   refreshStatus = null;
   leaveView?.();
   leaveView = null;
+  hasUnsaved = null;
   const email = h('input', { id: 'l-email', type: 'email', autocomplete: 'username', inputmode: 'email', autocapitalize: 'off' });
   const password = h('input', { id: 'l-password', type: 'password', autocomplete: 'current-password' });
   const error = h('div', { class: 'error', role: 'alert' });
@@ -812,7 +895,7 @@ function renderDetail(id) {
   const fmt = (iso) => new Date(iso).toLocaleString('ja-JP', { dateStyle: 'medium', timeStyle: 'short' });
   const list = sessionsOf(store.getAllSessions(), c.id);
   const editHash = `${companyHash(c.id)}/edit`;
-  const edit = (target) => () => editAt(editHash, target);
+  const edit = (target) => editTo(editHash, target);
 
   view.replaceChildren(
     h(
@@ -852,7 +935,7 @@ function renderDetail(id) {
       'div',
       { class: 'actions', style: 'margin-top:14px' },
       h('button', { class: 'btn btn-danger', type: 'button', onclick: () => onDelete(c) }, '削除'),
-      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => go(`${companyHash(c.id)}/edit`) }, '編集'),
+      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => editFromView(`${companyHash(c.id)}/edit`) }, '編集'),
     ),
     h(
       'section',
@@ -913,16 +996,16 @@ function renderCommonPrep() {
       'div',
       { class: 'detail prep' },
       h('p', { class: 'muted small' }, 'どの会社の面接でも使うメモです。会社の編集画面で横に出して、その会社のメモにコピーできます。'),
-      labelRow(`お題（${items.length}件）`, () => editAt(editHash, 'prep')),
+      labelRow(`お題（${items.length}件）`, editTo(editHash, 'prep')),
       prepList(items, {
-        action: (p) => editBtn(`お題「${p.title}」`, () => editAt(editHash, `prep:${p.id}`)),
+        action: (p) => editBtn(`お題「${p.title}」`, editTo(editHash, `prep:${p.id}`)),
         empty: '未登録（自己紹介・自己PR・転職理由など、どの会社でも話すことを準備できます）',
       }),
     ),
     h(
       'div',
       { class: 'actions', style: 'margin-top:14px' },
-      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => go(editHash) }, '編集'),
+      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => editFromView(editHash) }, '編集'),
     ),
   );
 }
@@ -930,16 +1013,19 @@ function renderCommonPrep() {
 function renderCommonPrepForm() {
   setHeader('共通の面接メモを編集', { back: true, settings: false });
   refreshView = null;
-  const existing = store.getCommonPrep();
+  let existing = store.getCommonPrep();
   const prep = fieldsEditor(existing, PREP_EDITOR);
+  let unsaved = null;
   const onSubmit = (e) => {
     e.preventDefault();
     try {
       const saved = store.updateCommonPrep(prep.value());
       const trashed = removedFields(existing, saved.prep).length;
+      // 保存しても編集画面のまま、スクロールの位置もそのままにする
+      existing = saved.prep;
+      showErrors({}, prep.errorTargets());
+      unsaved.mark();
       toast(trashed ? `保存しました（消したお題${trashed}件はゴミ箱に移しました）` : '保存しました', trashed ? 4000 : 2500);
-      history.replaceState(null, '', '#/prep');
-      render();
     } catch (err) {
       if (err instanceof store.ValidationError) showErrors(err.errors, prep.errorTargets());
       else toast(err.message);
@@ -950,14 +1036,10 @@ function renderCommonPrepForm() {
       'form',
       { class: 'form', novalidate: true, onsubmit: onSubmit },
       h('div', { class: 'field', 'data-focus': 'prep', 'data-focus-sel': '.field-title-input, .btn-add' }, h('span', { class: 'label' }, '共通の面接メモ'), prep.el),
-      h(
-        'div',
-        { class: 'actions' },
-        h('button', { class: 'btn', type: 'button', onclick: () => go('#/prep') }, 'キャンセル'),
-        h('button', { class: 'btn btn-primary', type: 'submit' }, '保存'),
-      ),
+      formActions(() => leaveForm('#/prep')),
     ),
   );
+  unsaved = trackUnsaved(() => prep.value());
 }
 
 /**
@@ -1092,33 +1174,47 @@ function renderForm(id) {
     }
   });
 
+  const collect = () => ({
+    name: nameInput.value,
+    sites: siteChoices.filter((s) => selected.has(s)),
+    url: urlInput.value,
+    ...(({ text, marks }) => ({ memo: text, memoMarks: marks }))(memo.value()),
+    fields: fields.value(),
+    prep: prep.value(),
+    // 「その他のサイト名」に書いただけでまだ追加していない文字も、変更として数える
+    pendingSite: customInput.value.trim(),
+  });
+  const errorTargets = () => ({
+    name: { input: nameInput, error: nameErr },
+    url: { input: urlInput, error: urlErr },
+    ...fields.errorTargets(),
+    ...prep.errorTargets(),
+  });
+  let unsaved = null;
+
   const onSubmit = (e) => {
     e.preventDefault();
     if (customInput.value.trim()) addCustom();
-    const input = {
-      name: nameInput.value,
-      sites: siteChoices.filter((s) => selected.has(s)),
-      url: urlInput.value,
-      ...(({ text, marks }) => ({ memo: text, memoMarks: marks }))(memo.value()),
-      fields: fields.value(),
-      prep: prep.value(),
-    };
+    const { pendingSite, ...input } = collect();
     try {
+      const isNew = !existing;
       const saved = existing ? store.update(existing.id, input) : store.add(input);
       const trashed = existing
         ? removedFields(fieldsOf(existing), saved.fields).length + removedFields(prepOf(existing), saved.prep).length
         : 0;
-      toast(existing ? (trashed ? `保存しました（消した項目${trashed}件はゴミ箱に移しました）` : '保存しました') : '登録しました', trashed ? 4000 : 2500);
-      history.replaceState(null, '', companyHash(saved.id));
-      render();
+      // 保存しても編集画面のまま、スクロールの位置もそのままにする。
+      // 次の保存は今保存した内容との差で考える（新しく登録した会社は、次から上書き保存になる）
+      existing = saved;
+      if (isNew) {
+        history.replaceState(null, '', `${companyHash(saved.id)}/edit`);
+        setHeader('編集', { back: true, settings: false });
+      }
+      showErrors({}, errorTargets());
+      unsaved.mark();
+      toast(isNew ? '登録しました' : trashed ? `保存しました（消した項目${trashed}件はゴミ箱に移しました）` : '保存しました', trashed ? 4000 : 2500);
     } catch (err) {
       if (err instanceof store.ValidationError) {
-        showErrors(err.errors, {
-          name: { input: nameInput, error: nameErr },
-          url: { input: urlInput, error: urlErr },
-          ...fields.errorTargets(),
-          ...prep.errorTargets(),
-        });
+        showErrors(err.errors, errorTargets());
       } else {
         toast(err.message);
       }
@@ -1144,15 +1240,11 @@ function renderForm(id) {
         h('div', { class: 'prep-label-row' }, h('span', { class: 'label' }, '面接で話すこと'), common.toggle),
         prep.el,
       ),
-      h(
-        'div',
-        { class: 'actions' },
-        h('button', { class: 'btn', type: 'button', onclick: () => go(parentHash()) }, 'キャンセル'),
-        h('button', { class: 'btn btn-primary', type: 'submit' }, '保存'),
-      ),
+      formActions(() => leaveForm(parentHash())),
     ),
     common.panel,
   );
+  unsaved = trackUnsaved(collect);
   if (!existing) nameInput.focus();
 }
 
@@ -1373,7 +1465,7 @@ function renderSessionDetail(cid, sid) {
   if (!c || !s || s.companyId !== cid) return renderNotFound('この記録は見つかりませんでした');
   setHeader(sessionLabel(s), { back: true });
   const editHash = `${sessionHash(cid, sid)}/edit`;
-  const edit = (target) => () => editAt(editHash, target);
+  const edit = (target) => editTo(editHash, target);
 
   view.replaceChildren(
     h(
@@ -1390,7 +1482,7 @@ function renderSessionDetail(cid, sid) {
       'div',
       { class: 'actions', style: 'margin-top:14px' },
       h('button', { class: 'btn btn-danger', type: 'button', onclick: () => onDeleteSession(s) }, '削除'),
-      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => go(`${sessionHash(cid, sid)}/edit`) }, '編集'),
+      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => editFromView(`${sessionHash(cid, sid)}/edit`) }, '編集'),
     ),
   );
 }
@@ -1540,28 +1632,38 @@ function renderSessionForm(cid, sid) {
     label: '感想・反省メモ',
   });
 
+  const collect = () => ({
+    type,
+    date: dateInput.value,
+    title: titleInput.value,
+    asked: asked.value(),
+    myQuestions: mine.value(),
+    ...(({ text, marks }) => ({ memo: text, memoMarks: marks }))(memo.value()),
+  });
+  const errorTargets = () => ({
+    type: { input: typeGroup, error: typeErr },
+    date: { input: dateInput, error: dateErr },
+    title: { input: titleInput, error: titleErr },
+  });
+  let unsaved = null;
+
   const onSubmit = (e) => {
     e.preventDefault();
-    const input = {
-      type,
-      date: dateInput.value,
-      title: titleInput.value,
-      asked: asked.value(),
-      myQuestions: mine.value(),
-      ...(({ text, marks }) => ({ memo: text, memoMarks: marks }))(memo.value()),
-    };
     try {
-      const saved = existing ? store.updateSessionById(existing.id, input) : store.addSession(cid, input);
-      toast(existing ? '保存しました' : '記録しました');
-      history.replaceState(null, '', sessionHash(cid, saved.id));
-      render();
+      const isNew = !existing;
+      const saved = existing ? store.updateSessionById(existing.id, collect()) : store.addSession(cid, collect());
+      // 保存しても編集画面のまま、スクロールの位置もそのままにする（新しい記録は次から上書き保存）
+      existing = saved;
+      if (isNew) {
+        history.replaceState(null, '', `${sessionHash(cid, saved.id)}/edit`);
+        setHeader('記録を編集', { back: true, settings: false });
+      }
+      showErrors({}, errorTargets());
+      unsaved.mark();
+      toast(isNew ? '記録しました' : '保存しました');
     } catch (err) {
       if (err instanceof store.ValidationError) {
-        showErrors(err.errors, {
-          type: { input: typeGroup, error: typeErr },
-          date: { input: dateInput, error: dateErr },
-          title: { input: titleInput, error: titleErr },
-        });
+        showErrors(err.errors, errorTargets());
       } else {
         toast(err.message);
       }
@@ -1579,14 +1681,10 @@ function renderSessionForm(cid, sid) {
       field('聞かれたこと と 自分の答え', asked.el, { focus: 'asked', focusSel: '.qa-input-q' }),
       field('自分がした質問 と 返ってきた答え', mine.el, { focus: 'mine', focusSel: '.qa-input-q' }),
       field('感想・反省メモ', memo.el, { focus: 'memo' }),
-      h(
-        'div',
-        { class: 'actions' },
-        h('button', { class: 'btn', type: 'button', onclick: () => go(parentHash()) }, 'キャンセル'),
-        h('button', { class: 'btn btn-primary', type: 'submit' }, '保存'),
-      ),
+      formActions(() => leaveForm(parentHash())),
     ),
   );
+  unsaved = trackUnsaved(collect);
 }
 
 /* ---------- 設定 ---------- */
@@ -1883,6 +1981,7 @@ function render({ keepScroll = false } = {}) {
   refreshStatus = null;
   leaveView?.();
   leaveView = null;
+  hasUnsaved = null;
   if (toastScope === 'view') hideToast();
   const path = location.hash.replace(/^#/, '') || '/';
   const dec = decodeURIComponent;
@@ -1916,7 +2015,7 @@ function render({ keepScroll = false } = {}) {
   applyPendingFocus();
 }
 
-backBtn.addEventListener('click', () => go(parentHash()));
+backBtn.addEventListener('click', () => leaveForm(parentHash()));
 settingsBtn.addEventListener('click', () => go('#/settings'));
 addBtn.addEventListener('click', () => go('#/new'));
 window.addEventListener('hashchange', () => render());

@@ -313,6 +313,22 @@ button:disabled { opacity: 0.6; }
 /* 面接で話すこと（詳細画面） */
 .prep-topic { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
 
+/* 編集画面の「閉じる」「保存」：画面の一番下に固定して、どこにいても押せるようにする */
+.form-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  margin: 0 -16px;
+  padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+/* 編集画面では下の余白（右下の＋ボタン用）をなくし、ボタンが一番下にぴったり付くようにする */
+body:has(.form-actions) { padding-bottom: 0; }
+#view:has(.form-actions) { padding-bottom: 0; }
+/* 共通メモを下半分に出しているときは、そのすぐ上に出す */
+#view.common-panel-open .form-actions { bottom: 45vh; padding-bottom: 10px; }
+
 /* 共通の面接メモ */
 .common-prep-btn { width: 100%; margin-bottom: 12px; justify-content: flex-start; font-weight: 600; }
 .prep-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
@@ -334,6 +350,7 @@ button:disabled { opacity: 0.6; }
 /* PC など画面が広いとき：右側に並べる */
 @media (min-width: 900px) {
   .common-panel { left: auto; top: 0; width: min(42vw, 520px); height: auto; border-top: none; border-left: 1px solid var(--border); box-shadow: -6px 0 20px rgba(0, 0, 0, 0.08); }
+  #view.common-panel-open .form-actions { bottom: 0; padding-bottom: calc(10px + env(safe-area-inset-bottom)); }
   #view.common-panel-open {
     padding-bottom: 16px;
     /* 右の共通メモを除いた幅の中で、入力欄を真ん中に置く */
@@ -374,6 +391,8 @@ body.is-sorting, body.is-sorting * { cursor: grabbing !important; user-select: n
 .field-suggest { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
 .field-suggest:empty { display: none; }
 .custom-field-row .field-title-input { padding: 10px 12px; border-radius: 10px; background: var(--bg); resize: none; line-height: 1.5; word-break: break-word; }
+/* お題・項目名は折り返して全文を見せる（高さは app.js の autoGrow で中身に合わせる） */
+.custom-field-row textarea.field-title-input { display: block; min-height: 0; }
 
 /* 入力欄は中身に合わせて伸びる（app.js の autoGrow）ので、中のスクロールバーは出さない */
 .field textarea, .qa-row textarea { overflow-y: hidden; }

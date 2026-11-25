@@ -128,6 +128,11 @@ main { padding: 16px; max-width: 640px; margin: 0 auto; outline: none; }
   cursor: pointer;
 }
 .card:active { transform: scale(0.99); }
+/* ホームのカードと、右端の並べ替えのつまみ */
+.card-row { display: flex; align-items: stretch; gap: 6px; }
+.card-row .card { flex: 1; min-width: 0; }
+.card-row .drag-handle { width: 40px; height: auto; flex: none; border-radius: 12px; font-size: 18px; color: var(--muted); }
+.sort-hint { margin: -4px 0 8px; font-size: 13px; }
 .card-name { font-weight: 700; font-size: 17px; word-break: break-word; }
 .card-memo { color: var(--muted); font-size: 14px; margin-top: 4px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; }
 
@@ -369,11 +374,25 @@ body:has(.form-actions) { padding-bottom: 0; }
   cursor: pointer;
 }
 .icon-mini:disabled { opacity: 0.35; cursor: default; }
+
+/* ドラッグで並べ替え（js/sortable.js）。つまみの上では画面をスクロールさせず、指の動きをドラッグに使う */
+.drag-handle {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  color: var(--muted);
+}
+.is-dragging { position: relative; z-index: 5; }
+.is-dragging > .card, .qa-row.is-dragging { box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22); }
+.is-dragging .drag-handle { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+body.is-sorting, body.is-sorting * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
 .field-suggest { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
 .field-suggest:empty { display: none; }
-.custom-field-row .field-title-input { padding: 10px 12px; border-radius: 10px; background: var(--bg); }
+.custom-field-row .field-title-input { padding: 10px 12px; border-radius: 10px; background: var(--bg); resize: none; line-height: 1.5; word-break: break-word; }
 /* お題・項目名は折り返して全文を見せる（高さは app.js の autoGrow で中身に合わせる） */
-.custom-field-row textarea.field-title-input { display: block; min-height: 0; resize: none; line-height: 1.5; word-break: break-word; }
+.custom-field-row textarea.field-title-input { display: block; min-height: 0; }
 
 /* 入力欄は中身に合わせて伸びる（app.js の autoGrow）ので、中のスクロールバーは出さない */
 .field textarea, .qa-row textarea { overflow-y: hidden; }
@@ -478,3 +497,6 @@ body:has(.form-actions) { padding-bottom: 0; }
 .trash-label { font-weight: 700; word-break: break-word; }
 .trash-item .actions { margin-top: 6px; }
 .trash-empty { width: 100%; margin-top: 16px; }
+
+/* 並べ替え中は右下の「＋」を薄くして、下の端までドラッグしやすくする */
+body.is-sorting .fab { opacity: 0.25; pointer-events: none; }

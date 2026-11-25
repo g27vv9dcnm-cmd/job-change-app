@@ -132,25 +132,76 @@ export function newId() {
   return 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
 }
 
-/** 新規作成。入力は normalizeInput 済みで validate を通っている前提 */
-export function createCompany(input, now = new Date()) {
+/**
+ * 新規作成。入力は normalizeInput 済みで validate を通っている前提。
+ * others（今ある会社）を渡すと、ホームの一番上に入る並び順を付ける。
+ */
+export function createCompany(input, now = new Date(), others = []) {
   const t = now.toISOString();
-  return { id: newId(), ...input, createdAt: t, updatedAt: t };
+  return { id: newId(), ...input, order: topOrder(others, now), createdAt: t, updatedAt: t };
 }
 
 export function updateCompany(existing, input, now = new Date()) {
-  return { ...existing, ...input, id: existing.id, createdAt: existing.createdAt, updatedAt: now.toISOString() };
+  // 並び順は編集前のまま固定する（編集しても一番上に飛ばないように）
+  return { ...existing, ...input, id: existing.id, order: orderKey(existing), createdAt: existing.createdAt, updatedAt: now.toISOString() };
 }
 
-/** 検索語（会社名・メモ・自分で作った項目・面接で話すこと）とサイトで絞り込み、更新が新しい順に並べる */
+/* ---------- ホームの並び順 ---------- */
+// 会社ごとに order（数字。小さいほど上）を持たせ、ドラッグで動かした会社の order だけを書き換える。
+// order が無い古いデータは「更新が新しいほど上」（今までの並び）になるよう、更新日時から仮の値を作る。
+// 仮の値も本物の値も「-ミリ秒の時刻」と同じ目盛りなので、混ざっていても自然に並ぶ。
+
+/** 一番上・一番下に動かしたときに、となりとあける間隔（1分ぶん） */
+export const ORDER_STEP = 60_000;
+
+/** 並び順の値（order が無ければ更新日時から作る） */
+export function orderKey(c) {
+  if (Number.isFinite(c?.order)) return c.order;
+  for (const t of [c?.updatedAt, c?.createdAt]) {
+    const ms = Date.parse(t ?? '');
+    if (Number.isFinite(ms)) return -ms;
+  }
+  return 0;
+}
+
+/** ホームの並び順に並べる（同じ値のときは id 順で、端末によって順番が変わらないようにする） */
+export function sortCompanies(companies) {
+  return [...companies].sort((a, b) => orderKey(a) - orderKey(b) || String(a.id).localeCompare(String(b.id)));
+}
+
+/** 新しく登録する会社が一番上に来る並び順の値 */
+export function topOrder(companies, now = new Date()) {
+  return Math.min(-now.getTime(), ...companies.map((c) => orderKey(c) - ORDER_STEP));
+}
+
+/**
+ * 会社 id を、ほかの会社だけを並べたときの toIndex 番目（0 が一番上）へ動かす。
+ * 書き換える必要がある [{ id, order }] を返す（ふつうは動かした1件だけ。
+ * 間に入れる隙間がもう無いときだけ、全部を等間隔に振り直す）。動かなければ空。
+ */
+export function moveCompany(companies, id, toIndex) {
+  const sorted = sortCompanies(companies);
+  const from = sorted.findIndex((c) => c.id === id);
+  if (from < 0) return [];
+  const rest = sorted.filter((c) => c.id !== id);
+  const to = Math.max(0, Math.min(rest.length, Math.trunc(toIndex)));
+  if (to === from || rest.length === 0) return [];
+  const prev = rest[to - 1];
+  const next = rest[to];
+  const order = !prev ? orderKey(next) - ORDER_STEP : !next ? orderKey(prev) + ORDER_STEP : (orderKey(prev) + orderKey(next)) / 2;
+  if ((!prev || order > orderKey(prev)) && (!next || order < orderKey(next))) return [{ id, order }];
+  // 隙間が無い（同じ場所に何十回も入れた、同じ時刻のデータ同士など）ので振り直す
+  rest.splice(to, 0, sorted[from]);
+  const base = orderKey(sorted[0]);
+  return rest.map((c, i) => ({ id: c.id, order: base + i * ORDER_STEP })).filter((x, i) => rest[i].order !== x.order);
+}
+
+/** 検索語（会社名・メモ・自分で作った項目・面接で話すこと）とサイトで絞り込み、ホームの並び順に並べる */
 export function filterCompanies(companies, { query = '', site = '' } = {}) {
   const q = query.trim().toLowerCase();
   const hit = (c) =>
     [c.name, c.memo, ...[...fieldsOf(c), ...prepOf(c)].flatMap((f) => [f.title, f.body])].some((t) => String(t ?? '').toLowerCase().includes(q));
-  return companies
-    .filter((c) => !site || c.sites.includes(site))
-    .filter((c) => !q || hit(c))
-    .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
+  return sortCompanies(companies.filter((c) => (!site || c.sites.includes(site)) && (!q || hit(c))));
 }
 
 /** 登録済みの会社で使われているサイト一覧（プリセット順 → それ以外は名前順） */
@@ -310,7 +361,7 @@ export function parseBackup(text) {
     if (!hasId(raw)) throw new Error(`会社の${i + 1}件目のデータが壊れています`);
     const input = normalizeInput(raw);
     if (Object.keys(validate(input)).length) throw new Error(`会社の${i + 1}件目のデータが壊れています`);
-    return { id: raw.id, ...input, ...timestamps(raw) };
+    return { id: raw.id, ...input, ...(Number.isFinite(raw.order) ? { order: raw.order } : {}), ...timestamps(raw) };
   });
   const companyIds = new Set(companies.map((c) => c.id));
   const sessions = (data.sessions ?? []).map((raw, i) => {

@@ -255,17 +255,52 @@ function showErrors(errors, map) {
 }
 
 /* ---------- 見ている項目から編集を開く ---------- */
-/** 次に開く編集画面で、自動でスクロールして入力を始める場所（data-focus の値） */
+/**
+ * 次に開く編集画面で、自動でスクロールする場所。
+ * { target: data-focus の値, focus: 入力を始めるか, offset: 画面の上からの位置（focus しないとき） }
+ */
 let pendingFocus = null;
 
 function editAt(hash, target) {
-  pendingFocus = target;
+  pendingFocus = { target, focus: true };
   go(hash);
 }
 
+/** 詳細画面の ✎ 用。押すとその項目の編集を開く関数（どの項目かを .target に持つ） */
+const editTo = (hash, target) => Object.assign(() => editAt(hash, target), { target });
+
 /** 詳細画面の見出しの横に置く「✎」ボタン */
 function editBtn(label, onClick) {
-  return h('button', { class: 'edit-mini', type: 'button', 'aria-label': `${label}を編集`, title: `${label}を編集`, onclick: onClick }, '✎');
+  return h(
+    'button',
+    {
+      class: 'edit-mini',
+      type: 'button',
+      'aria-label': `${label}を編集`,
+      title: `${label}を編集`,
+      'data-edit-target': onClick.target ?? null,
+      onclick: onClick,
+    },
+    '✎',
+  );
+}
+
+/** ヘッダーの下端（画面の上からの位置） */
+const headerBottom = () => document.querySelector('.bar')?.getBoundingClientRect().bottom ?? 0;
+
+/**
+ * 詳細画面の大きな「編集」ボタン用。今画面に見えている一番上の項目の位置から、編集画面を開く。
+ * 一番上を見ているときは、今まで通り編集画面の一番上から開く。
+ */
+function editFromView(hash) {
+  const top = headerBottom();
+  const seen = [...view.querySelectorAll('[data-edit-target]')].find((b) => b.getBoundingClientRect().bottom > top + 4);
+  if (window.scrollY > 40 && seen) {
+    // 見えていた項目が、編集画面でもだいたい同じ高さに来るようにする（入力は始めない）
+    const offset = Math.max(8, seen.getBoundingClientRect().top - top);
+    pendingFocus = { target: seen.dataset.editTarget, focus: false, offset };
+  }
+  go(hash);
 }
 
 /** 見出し＋✎ */
@@ -284,11 +319,17 @@ function placeCaretAtEnd(el) {
 
 /** 編集画面を開いた直後に、✎ を押した項目までスクロールして入力できる状態にする */
 function applyPendingFocus() {
-  const target = pendingFocus;
+  const pending = pendingFocus;
   pendingFocus = null;
-  if (!target) return;
-  const el = [...view.querySelectorAll('[data-focus]')].find((e) => e.dataset.focus === target);
+  if (!pending) return;
+  const el = [...view.querySelectorAll('[data-focus]')].find((e) => e.dataset.focus === pending.target);
   if (!el) return;
+  if (!pending.focus) {
+    requestAnimationFrame(() => {
+      window.scrollTo(0, window.scrollY + el.getBoundingClientRect().top - headerBottom() - pending.offset);
+    });
+    return;
+  }
   const pick = (sel) => (el.matches(sel) ? el : el.querySelector(sel));
   const input = el.dataset.focusSel ? pick(el.dataset.focusSel) : pick('.rich-input') || pick('textarea, input, button');
   requestAnimationFrame(() => {
@@ -854,7 +895,7 @@ function renderDetail(id) {
   const fmt = (iso) => new Date(iso).toLocaleString('ja-JP', { dateStyle: 'medium', timeStyle: 'short' });
   const list = sessionsOf(store.getAllSessions(), c.id);
   const editHash = `${companyHash(c.id)}/edit`;
-  const edit = (target) => () => editAt(editHash, target);
+  const edit = (target) => editTo(editHash, target);
 
   view.replaceChildren(
     h(
@@ -894,7 +935,7 @@ function renderDetail(id) {
       'div',
       { class: 'actions', style: 'margin-top:14px' },
       h('button', { class: 'btn btn-danger', type: 'button', onclick: () => onDelete(c) }, '削除'),
-      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => go(`${companyHash(c.id)}/edit`) }, '編集'),
+      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => editFromView(`${companyHash(c.id)}/edit`) }, '編集'),
     ),
     h(
       'section',
@@ -955,16 +996,16 @@ function renderCommonPrep() {
       'div',
       { class: 'detail prep' },
       h('p', { class: 'muted small' }, 'どの会社の面接でも使うメモです。会社の編集画面で横に出して、その会社のメモにコピーできます。'),
-      labelRow(`お題（${items.length}件）`, () => editAt(editHash, 'prep')),
+      labelRow(`お題（${items.length}件）`, editTo(editHash, 'prep')),
       prepList(items, {
-        action: (p) => editBtn(`お題「${p.title}」`, () => editAt(editHash, `prep:${p.id}`)),
+        action: (p) => editBtn(`お題「${p.title}」`, editTo(editHash, `prep:${p.id}`)),
         empty: '未登録（自己紹介・自己PR・転職理由など、どの会社でも話すことを準備できます）',
       }),
     ),
     h(
       'div',
       { class: 'actions', style: 'margin-top:14px' },
-      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => go(editHash) }, '編集'),
+      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => editFromView(editHash) }, '編集'),
     ),
   );
 }
@@ -1424,7 +1465,7 @@ function renderSessionDetail(cid, sid) {
   if (!c || !s || s.companyId !== cid) return renderNotFound('この記録は見つかりませんでした');
   setHeader(sessionLabel(s), { back: true });
   const editHash = `${sessionHash(cid, sid)}/edit`;
-  const edit = (target) => () => editAt(editHash, target);
+  const edit = (target) => editTo(editHash, target);
 
   view.replaceChildren(
     h(
@@ -1441,7 +1482,7 @@ function renderSessionDetail(cid, sid) {
       'div',
       { class: 'actions', style: 'margin-top:14px' },
       h('button', { class: 'btn btn-danger', type: 'button', onclick: () => onDeleteSession(s) }, '削除'),
-      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => go(`${sessionHash(cid, sid)}/edit`) }, '編集'),
+      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => editFromView(`${sessionHash(cid, sid)}/edit`) }, '編集'),
     ),
   );
 }

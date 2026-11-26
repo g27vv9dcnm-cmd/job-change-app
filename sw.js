@@ -1,6 +1,6 @@
 // オフラインでも開けるように、アプリ本体をキャッシュする。
 // ファイルを変更したら VERSION を上げると、次回起動時に新しい版へ入れ替わる。
-const VERSION = 'v10';
+const VERSION = 'v11';
 const CACHE = `job-change-app-${VERSION}`;
 const ASSETS = [
   './',

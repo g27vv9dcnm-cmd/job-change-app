@@ -7,6 +7,7 @@ import {
   NAME_MAX,
   FIELD_TITLE_MAX,
   fieldsOf,
+  sortCompanies,
   prepOf,
   copyPrepItem,
   PREP_TOPIC_MAX,
@@ -1042,49 +1043,130 @@ function renderCommonPrepForm() {
   unsaved = trackUnsaved(() => prep.value());
 }
 
+/** 横に出す表示で、どのタブを開いているか・どの会社を選んでいるか（端末ごとに覚える） */
+const SIDE_TAB_KEY = 'side-panel-tab';
+const SIDE_OTHER_KEY = 'side-panel-other-company';
+const SIDE_TABS = [
+  { key: 'common', label: '共通メモ' },
+  { key: 'self', label: 'この会社のメモ' },
+  { key: 'other', label: 'ほかの会社' },
+];
+
 /**
- * 会社の編集画面で、共通の面接メモを横（スマホは画面の下半分）に出す部品。
- * 各お題の「この会社にコピー」で、会社ごとの欄（prepEditor）の最後に追加する。
+ * 会社の編集画面で、メモを横（スマホは画面の下半分）に出す部品。タブで3つを切り替える。
+ * - 共通メモ：共通の面接メモ。「この会社にコピー」で面接で話すことに追加
+ * - この会社のメモ：編集中のこの会社のメモ・自分で作る項目・面接で話すこと（今の入力内容）
+ * - ほかの会社：選んだ会社のメモ・自分で作る項目・面接で話すこと。お題や項目はこの会社にコピーできる
+ * 横に出した内容は読むだけ（文字を選んでのコピー＆貼り付けはできる）。
  */
-function commonPrepPanel(prepEditor) {
+function commonPrepPanel({ prepEditor, fieldsEditor: fieldsEd, current, companyId }) {
   let open = lsGet(COMMON_PANEL_KEY) === 'open';
-  const panel = h('aside', { class: 'common-panel', 'aria-label': '共通の面接メモ' });
+  let tab = SIDE_TABS.some((t) => t.key === lsGet(SIDE_TAB_KEY)) ? lsGet(SIDE_TAB_KEY) : 'common';
+  const panel = h('aside', { class: 'common-panel', 'aria-label': 'メモを横に表示' });
   const toggle = h('button', { class: 'btn btn-small common-toggle', type: 'button', onclick: () => setOpen(!open) });
-  const draw = () => {
-    const items = store.getCommonPrep();
+
+  const copyBtn = (label, onClick) =>
+    h('button', { class: 'btn btn-small copy-btn', type: 'button', onclick: onClick }, label);
+  const copyPrep = (p) =>
+    copyBtn('この会社にコピー', () => {
+      prepEditor.add(copyPrepItem(p));
+      toast(`「${p.title}」を面接で話すことにコピーしました`);
+    });
+  const copyField = (f) =>
+    copyBtn('この会社にコピー', () => {
+      fieldsEd.add(copyPrepItem(f));
+      toast(`「${f.title}」を自分で作る項目にコピーしました`);
+    });
+  const section = (title, content) => h('section', { class: 'side-section' }, h('h4', { class: 'side-section-title' }, title), content);
+
+  /** 1社分のメモ・自分で作る項目・面接で話すことを並べる */
+  const companyView = (c, { copy }) =>
+    h(
+      'div',
+      {},
+      section('メモ', c.memo ? richView(c.memo, c.memoMarks) : h('span', { class: 'muted' }, '未登録')),
+      fieldsOf(c).length ? section('自分で作る項目', prepList(fieldsOf(c), { action: copy ? copyField : null })) : null,
+      section(`面接で話すこと（${prepOf(c).length}件）`, prepList(prepOf(c), { action: copy ? copyPrep : null, empty: '未登録' })),
+    );
+
+  const otherCompanies = () => sortCompanies(store.getAll().filter((c) => c.id !== companyId()));
+
+  const body = () => {
+    if (tab === 'common') {
+      return prepList(store.getCommonPrep(), {
+        action: copyPrep,
+        empty: '共通の面接メモはまだありません。ホーム画面の「📝 共通の面接メモ」から書けます。',
+      });
+    }
+    if (tab === 'self') {
+      return h(
+        'div',
+        {},
+        h(
+          'p',
+          { class: 'muted small side-note' },
+          '今の入力内容です（保存前の内容も出ます）。',
+          h('button', { class: 'link-btn', type: 'button', onclick: () => draw() }, '最新にする'),
+        ),
+        companyView(current(), { copy: false }),
+      );
+    }
+    const others = otherCompanies();
+    if (!others.length) return h('p', { class: 'muted' }, 'ほかの会社はまだ登録されていません。');
+    let id = lsGet(SIDE_OTHER_KEY);
+    if (!others.some((c) => c.id === id)) id = others[0].id;
+    const select = h(
+      'select',
+      {
+        class: 'side-company-select',
+        'aria-label': '表示する会社',
+        onchange: (e) => {
+          lsSet(SIDE_OTHER_KEY, e.target.value);
+          draw();
+        },
+      },
+      others.map((c) => h('option', { value: c.id }, c.name)),
+    );
+    select.value = id;
+    return h('div', {}, select, companyView(store.get(id), { copy: true }));
+  };
+
+  function draw() {
+    const scroller = h('div', { class: 'common-panel-body' }, body());
     panel.replaceChildren(
       h(
         'div',
         { class: 'common-panel-head' },
-        h('strong', {}, `共通の面接メモ（${items.length}件）`),
-        h('button', { class: 'icon-mini', type: 'button', 'aria-label': '閉じる', title: '閉じる', onclick: () => setOpen(false) }, '×'),
-      ),
-      h(
-        'div',
-        { class: 'common-panel-body' },
-        prepList(items, {
-          action: (p) =>
+        h(
+          'div',
+          { class: 'side-tabs', role: 'tablist' },
+          SIDE_TABS.map((t) =>
             h(
               'button',
               {
-                class: 'btn btn-small copy-btn',
+                class: 'side-tab',
                 type: 'button',
+                role: 'tab',
+                'aria-selected': String(t.key === tab),
                 onclick: () => {
-                  prepEditor.add(copyPrepItem(p));
-                  toast(`「${p.title}」をこの会社のメモにコピーしました`);
+                  tab = t.key;
+                  lsSet(SIDE_TAB_KEY, tab);
+                  draw();
                 },
               },
-              'この会社にコピー',
+              t.label,
             ),
-          empty: '共通の面接メモはまだありません。ホーム画面の「📝 共通の面接メモ」から書けます。',
-        }),
+          ),
+        ),
+        h('button', { class: 'icon-mini', type: 'button', 'aria-label': '横の表示を閉じる', title: '横の表示を閉じる', onclick: () => setOpen(false) }, '×'),
       ),
+      scroller,
     );
-  };
+  }
   function setOpen(v) {
     open = v;
     lsSet(COMMON_PANEL_KEY, v ? 'open' : 'closed');
-    toggle.textContent = open ? '共通メモを閉じる' : '共通メモを横に出す';
+    toggle.textContent = open ? '横の表示を閉じる' : 'メモを横に出す';
     toggle.setAttribute('aria-expanded', String(open));
     panel.hidden = !open;
     view.classList.toggle('common-panel-open', open);
@@ -1132,7 +1214,17 @@ function renderForm(id) {
   const urlErr = h('div', { class: 'error', role: 'alert' });
   const fields = fieldsEditor(fieldsOf(existing), { usedTitles: usedFieldTitles(store.getAll()) });
   const prep = fieldsEditor(prepOf(existing), PREP_EDITOR);
-  const common = commonPrepPanel(prep);
+  // 横に出す表示の「この会社のメモ」は、保存前でも今の入力内容を出す
+  const common = commonPrepPanel({
+    prepEditor: prep,
+    fieldsEditor: fields,
+    current: () => {
+      const { text, marks } = memo.value();
+      const filled = (list) => list.filter((f) => f.title.trim() || f.body.trim());
+      return { memo: text, memoMarks: marks, fields: filled(fields.value()), prep: filled(prep.value()) };
+    },
+    companyId: () => existing?.id ?? null,
+  });
   leaveView = common.close;
 
   const optionsEl = h('div', { class: 'site-options', role: 'group', 'aria-label': '利用サイト' });

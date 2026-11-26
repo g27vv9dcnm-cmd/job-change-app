@@ -246,6 +246,7 @@ function showErrors(errors, map) {
   for (const [key, { input, error }] of Object.entries(map)) {
     error.textContent = errors[key] ?? '';
     if (errors[key]) {
+      input.closest('.qa-row')?.classList.add('is-open'); // たたんでいても、まちがいのある項目は開く
       input.setAttribute('aria-invalid', 'true');
       first ??= input;
     } else {
@@ -309,6 +310,58 @@ function labelRow(label, onEdit) {
   return h('div', { class: 'detail-label-row' }, h('span', { class: 'detail-label' }, label), editBtn(label, onEdit));
 }
 
+/* ---------- たたむ（タイトルだけ表示） ---------- */
+const FOLD_FIELDS = 'fold-fields';
+const FOLD_PREP = 'fold-prep';
+
+/**
+ * 詳細画面用。wrap の中の .fold-item を、たたむとタイトル（.fold-hit）だけの表示にする。
+ * たたんだかどうかは key で覚えておき、編集画面と同じ状態にする。
+ */
+function foldToggle(key, wrap) {
+  const btn = h('button', { class: 'btn btn-small fold-toggle', type: 'button' });
+  const apply = (folded) => {
+    wrap.classList.toggle('is-folded', folded);
+    btn.textContent = folded ? '全部ひらく' : 'たたむ';
+    btn.setAttribute('aria-pressed', String(folded));
+    wrap.querySelectorAll('.fold-item').forEach((item) => item.classList.remove('is-open'));
+    wrap.querySelectorAll('.fold-hit').forEach((hit) => {
+      if (folded) {
+        hit.setAttribute('role', 'button');
+        hit.setAttribute('tabindex', '0');
+        hit.setAttribute('aria-expanded', 'false');
+      } else {
+        hit.removeAttribute('role');
+        hit.removeAttribute('tabindex');
+        hit.removeAttribute('aria-expanded');
+      }
+    });
+  };
+  const flip = (hit) => {
+    if (!wrap.classList.contains('is-folded')) return;
+    const item = hit.closest('.fold-item');
+    const open = item.classList.toggle('is-open');
+    hit.setAttribute('aria-expanded', String(open));
+  };
+  wrap.addEventListener('click', (e) => {
+    const hit = e.target.closest('.fold-hit');
+    if (hit && wrap.contains(hit)) flip(hit);
+  });
+  wrap.addEventListener('keydown', (e) => {
+    const hit = e.target.closest?.('.fold-hit');
+    if (!hit || e.target !== hit || (e.key !== 'Enter' && e.key !== ' ')) return;
+    e.preventDefault();
+    flip(hit);
+  });
+  btn.addEventListener('click', () => {
+    const folded = !wrap.classList.contains('is-folded');
+    lsSet(key, folded ? '1' : '0');
+    apply(folded);
+  });
+  apply(lsGet(key) === '1');
+  return btn;
+}
+
 function placeCaretAtEnd(el) {
   const range = document.createRange();
   range.selectNodeContents(el);
@@ -325,6 +378,7 @@ function applyPendingFocus() {
   if (!pending) return;
   const el = [...view.querySelectorAll('[data-focus]')].find((e) => e.dataset.focus === pending.target);
   if (!el) return;
+  if (pending.focus) el.closest('.qa-row')?.classList.add('is-open'); // たたんでいても、その項目は開いて入力できるようにする
   if (!pending.focus) {
     requestAnimationFrame(() => {
       window.scrollTo(0, window.scrollY + el.getBoundingClientRect().top - headerBottom() - pending.offset);
@@ -913,23 +967,8 @@ function renderDetail(id) {
           : h('span', { class: 'muted' }, '未登録'),
       ),
       h('div', {}, labelRow('メモ', edit('memo')), c.memo ? richView(c.memo, c.memoMarks) : h('span', { class: 'muted' }, '未登録')),
-      fieldsOf(c).map((f) =>
-        h(
-          'div',
-          { class: 'custom-field' },
-          labelRow(f.title, edit(`field:${f.id}`)),
-          f.body ? richView(f.body, f.bodyMarks) : h('span', { class: 'muted' }, '未記入'),
-        ),
-      ),
-      h(
-        'div',
-        { class: 'prep' },
-        labelRow(`面接で話すこと（${prepOf(c).length}件）`, edit('prep')),
-        prepList(prepOf(c), {
-          action: (p) => editBtn(`お題「${p.title}」`, edit(`prep:${p.id}`)),
-          empty: '未登録（志望動機・自己PRなど、面接で言うことを準備できます）',
-        }),
-      ),
+      detailFields(c, edit),
+      detailPrep(c, edit),
       h('div', { class: 'detail-meta' }, `登録 ${fmt(c.createdAt)}・更新 ${fmt(c.updatedAt)}`),
     ),
     h(
@@ -970,18 +1009,55 @@ function renderDetail(id) {
   );
 }
 
-/** お題＋話すことの一覧。action(p) でお題の横に置くボタンを作る */
-function prepList(items, { action = null, empty = '未登録' } = {}) {
+/** 詳細画面の「自分で作る項目」。たたむとタイトルだけになる */
+function detailFields(c, edit) {
+  const list = fieldsOf(c);
+  if (!list.length) return null;
+  const wrap = h(
+    'div',
+    { class: 'fold-list' },
+    list.map((f) =>
+      h(
+        'div',
+        { class: 'custom-field fold-item' },
+        h('div', { class: 'detail-label-row' }, h('span', { class: 'detail-label fold-hit' }, f.title), editBtn(f.title, edit(`field:${f.id}`))),
+        h('div', { class: 'fold-body' }, f.body ? richView(f.body, f.bodyMarks) : h('span', { class: 'muted' }, '未記入')),
+      ),
+    ),
+  );
+  return h(
+    'div',
+    { class: 'fold-section' },
+    h('div', { class: 'detail-label-row' }, h('span', { class: 'detail-label' }, `自分で作る項目（${list.length}件）`), foldToggle(FOLD_FIELDS, wrap)),
+    wrap,
+  );
+}
+
+/** 詳細画面の「面接で話すこと」。たたむとお題だけになる */
+function detailPrep(c, edit) {
+  const items = prepOf(c);
+  const list = prepList(items, {
+    action: (p) => editBtn(`お題「${p.title}」`, edit(`prep:${p.id}`)),
+    empty: '未登録（志望動機・自己PRなど、面接で言うことを準備できます）',
+    fold: true,
+  });
+  const row = labelRow(`面接で話すこと（${items.length}件）`, edit('prep'));
+  if (items.length) row.append(h('div', { class: 'label-btns' }, foldToggle(FOLD_PREP, list), row.lastChild));
+  return h('div', { class: 'prep' }, row, list);
+}
+
+/** お題＋話すことの一覧。action(p) でお題の横に置くボタンを作る。fold: true でたためるようにする */
+function prepList(items, { action = null, empty = '未登録', fold = false } = {}) {
   if (!items.length) return h('span', { class: 'muted' }, empty);
   return h(
     'ol',
-    { class: 'qa-list' },
+    { class: fold ? 'qa-list fold-list' : 'qa-list' },
     items.map((p) =>
       h(
         'li',
-        { class: 'qa-item' },
-        h('div', { class: 'qa-q prep-topic' }, h('span', {}, p.title), action ? action(p) : null),
-        p.body ? h('div', { class: 'qa-a' }, richView(p.body, p.bodyMarks)) : h('div', { class: 'muted small' }, '未記入'),
+        { class: fold ? 'qa-item fold-item' : 'qa-item' },
+        h('div', { class: 'qa-q prep-topic' }, h('span', { class: fold ? 'fold-hit' : null }, p.title), action ? action(p) : null),
+        h('div', { class: 'fold-body' }, p.body ? h('div', { class: 'qa-a' }, richView(p.body, p.bodyMarks)) : h('div', { class: 'muted small' }, '未記入')),
       ),
     ),
   );
@@ -1212,8 +1288,8 @@ function renderForm(id) {
   const memo = richEditor({ id: 'f-memo', text: existing?.memo ?? '', marks: existing?.memoMarks, placeholder: '志望動機、気になる点など', label: 'メモ' });
   const nameErr = h('div', { class: 'error', role: 'alert' });
   const urlErr = h('div', { class: 'error', role: 'alert' });
-  const fields = fieldsEditor(fieldsOf(existing), { usedTitles: usedFieldTitles(store.getAll()) });
-  const prep = fieldsEditor(prepOf(existing), PREP_EDITOR);
+  const fields = fieldsEditor(fieldsOf(existing), { usedTitles: usedFieldTitles(store.getAll()), foldKey: FOLD_FIELDS });
+  const prep = fieldsEditor(prepOf(existing), { ...PREP_EDITOR, foldKey: FOLD_PREP });
   // 横に出す表示の「この会社のメモ」は、保存前でも今の入力内容を出す
   const common = commonPrepPanel({
     prepEditor: prep,
@@ -1325,11 +1401,11 @@ function renderForm(id) {
       ),
       field('求人URL', [urlInput, urlErr], { forId: 'f-url', focus: 'url', focusSel: '#f-url' }),
       h('div', { class: 'field', 'data-focus': 'memo' }, h('span', { class: 'label' }, 'メモ'), memo.el),
-      h('div', { class: 'field' }, h('span', { class: 'label' }, '自分で作る項目'), fields.el),
+      h('div', { class: 'field' }, h('div', { class: 'prep-label-row' }, h('span', { class: 'label' }, '自分で作る項目'), fields.foldBtn), fields.el),
       h(
         'div',
         { class: 'field', 'data-focus': 'prep', 'data-focus-sel': '.field-title-input, .btn-add' },
-        h('div', { class: 'prep-label-row' }, h('span', { class: 'label' }, '面接で話すこと'), common.toggle),
+        h('div', { class: 'prep-label-row' }, h('span', { class: 'label' }, '面接で話すこと'), h('div', { class: 'label-btns' }, prep.foldBtn, common.toggle)),
         prep.el,
       ),
       formActions(() => leaveForm(parentHash())),
@@ -1392,8 +1468,33 @@ function fieldsEditor(initial, opts = {}) {
     addLabel = '＋ 項目を追加',
     suggestions = FIELD_SUGGESTIONS,
     usedTitles = [],
+    foldKey = null,
   } = opts;
   const rowsEl = h('div', { class: 'qa-rows' });
+  // たたむ（タイトルだけ表示）。foldKey があるときだけ使う
+  let folded = Boolean(foldKey) && lsGet(foldKey) === '1';
+  const foldBtn = foldKey
+    ? h('button', {
+        class: 'btn btn-small fold-toggle',
+        type: 'button',
+        onclick: () => {
+          folded = !folded;
+          lsSet(foldKey, folded ? '1' : '0');
+          drawFold();
+        },
+      })
+    : null;
+  function drawFold() {
+    if (!foldBtn) return;
+    rowsEl.classList.toggle('is-folded', folded);
+    foldBtn.textContent = folded ? '全部ひらく' : 'たたむ';
+    foldBtn.setAttribute('aria-pressed', String(folded));
+    foldBtn.hidden = rows.length === 0;
+    rows.forEach((r) => {
+      r.row.classList.remove('is-open');
+      r.foldTitle.setAttribute('aria-expanded', 'false');
+    });
+  }
   const suggestEl = h('div', { class: 'field-suggest' });
   const rows = [];
 
@@ -1403,6 +1504,7 @@ function fieldsEditor(initial, opts = {}) {
       r.up.disabled = i === 0;
       r.down.disabled = i === rows.length - 1;
     });
+    if (foldBtn) foldBtn.hidden = rows.length === 0;
     drawSuggestions();
   };
   const move = (entry, d) => {
@@ -1415,7 +1517,7 @@ function fieldsEditor(initial, opts = {}) {
     const btn = d < 0 ? entry.up : entry.down;
     (btn.disabled ? (d < 0 ? entry.down : entry.up) : btn).focus();
   };
-  const addRow = (f = {}, focus = null) => {
+  const addRow = (f = {}, focus = null, addOpen = false) => {
     // 長いお題も全文見えるよう、折り返して縦に伸びる欄にする（改行は入れず、1行の文章として保存する）
     const title = h('textarea', {
       class: 'field-title-input',
@@ -1471,18 +1573,30 @@ function fieldsEditor(initial, opts = {}) {
       },
       `この${noun}を消す`,
     );
+    // たたんだときに出すタイトル。押すとこの項目だけ開く／閉じる
+    const foldTitle = h('button', {
+      class: 'fold-title',
+      type: 'button',
+      'aria-expanded': 'false',
+      onclick: () => foldTitle.setAttribute('aria-expanded', String(row.classList.toggle('is-open'))),
+    });
+    const syncFoldTitle = () => (foldTitle.textContent = title.value.trim() || `（${titleLabel}なし）`);
+    title.addEventListener('input', syncFoldTitle);
+    syncFoldTitle();
     const id = f.id || newId();
     const row = h(
       'div',
       { class: 'qa-row custom-field-row', 'data-focus': `${key}:${id}` },
       h('div', { class: 'qa-row-head' }, h('div', { class: 'row-move' }, grip, up, down), del),
+      foldTitle,
       title,
       error,
       body.el,
     );
-    const entry = { id, row, title, body, error, up, down };
+    const entry = { id, row, title, body, error, up, down, foldTitle };
     rows.push(entry);
     redraw();
+    if (focus || addOpen) row.classList.add('is-open'); // たたんでいても、新しく足した項目は開いておく
     if (focus === 'title') title.focus();
     if (focus === 'body') body.area.focus();
   };
@@ -1511,6 +1625,7 @@ function fieldsEditor(initial, opts = {}) {
 
   initial.forEach((f) => addRow(f));
   redraw();
+  drawFold();
   const el = h(
     'div',
     {},
@@ -1520,9 +1635,10 @@ function fieldsEditor(initial, opts = {}) {
   );
   return {
     el,
+    foldBtn,
     /** 最後に1件足して、そこまでスクロールする（共通メモからのコピーで使う） */
     add: (f) => {
-      addRow(f);
+      addRow(f, null, true);
       rows.at(-1).row.scrollIntoView({ block: 'center', behavior: 'smooth' });
     },
     value: () =>

@@ -510,3 +510,27 @@ body.is-sorting, body.is-sorting * { cursor: grabbing !important; user-select: n
 
 /* 並べ替え中は右下の「＋」を薄くして、下の端までドラッグしやすくする */
 body.is-sorting .fab { opacity: 0.25; pointer-events: none; }
+
+/* ---------- たたむ（タイトルだけ表示） ---------- */
+.label-btns { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.fold-toggle { flex-shrink: 0; }
+.fold-title { display: none; }
+/* 編集画面：たたむと、つまみ・↑↓・消すボタンとタイトルだけにする */
+.qa-rows.is-folded .fold-title {
+  display: block; width: 100%; text-align: left; padding: 6px 4px; border: 0; background: none;
+  color: var(--text); font: inherit; font-weight: 600; word-break: break-word; cursor: pointer;
+}
+.qa-rows.is-folded .fold-title::before, .fold-list.is-folded .fold-hit::before { content: '▸ '; color: var(--muted); }
+.qa-rows.is-folded .qa-row.is-open .fold-title::before, .fold-list.is-folded .fold-item.is-open .fold-hit::before { content: '▾ '; }
+.qa-rows.is-folded .qa-row:not(.is-open) > :not(.qa-row-head):not(.fold-title) { display: none; }
+.qa-rows.is-folded .qa-row:not(.is-open) { gap: 4px; }
+/* 詳細画面：たたむと見出し（タイトル）だけにする */
+.fold-list.is-folded .fold-item:not(.is-open) .fold-body { display: none; }
+.fold-list.is-folded .fold-hit { cursor: pointer; }
+.fold-list.is-folded .custom-field { margin-bottom: 0; }
+.fold-section .fold-list { display: flex; flex-direction: column; gap: 12px; }
+.fold-list.is-folded, .fold-section .fold-list.is-folded { gap: 4px; }
+.prep-label-row { flex-wrap: wrap; }
+.prep-label-row .label { white-space: nowrap; }
+.label-btns { flex-wrap: wrap; justify-content: flex-end; }
+.detail .fold-toggle { padding: 4px 12px; min-height: 0; font-size: 13px; }
